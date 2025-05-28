@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.13;
 
-import {IERC20} from "@thirdweb-dev/contracts/eip/interface/IERC20.sol";
 import {ReentrancyGuard} from "@thirdweb-dev/contracts/external-deps/openzeppelin/security/ReentrancyGuard.sol";
 import {Ownable} from "@thirdweb-dev/contracts/extension/Ownable.sol";
 
 /**
  * @title BinaryAMMPredictionMarket
- * @dev Individual binary prediction market contract with CPMM
+ * @dev Individual binary prediction market contract with CPMM using native tokens
+ * Implements Constant Product Market Maker (x * y = k) for automated market making
  */
 contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     /// @notice Market prediction outcome enum
@@ -33,7 +33,6 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         uint256 totalLpTokens;
     }
 
-    IERC20 public bettingToken;
     bytes32 public immutable marketId;
     address public factory;
     
@@ -51,6 +50,10 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     uint256 public tradingFee = 30; // 0.3% trading fee
     uint256 public constant FEE_DENOMINATOR = 10000;
     uint256 public constant PRECISION = 1e18;
+    
+    // CPMM parameters
+    uint256 public constant MIN_LIQUIDITY = 1000; // Minimum liquidity to prevent division by zero
+    uint256 public constant MAX_PRICE_IMPACT = 9000; // 90% max price impact in basis points
 
     /// @notice Events
     event LiquidityAdded(
@@ -71,7 +74,8 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         uint256 amountIn,
         uint256 tokensOut,
         uint256 newPriceA,
-        uint256 fee
+        uint256 fee,
+        uint256 priceImpact
     );
 
     event TokensSold(
@@ -80,7 +84,8 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         uint256 tokensIn,
         uint256 amountOut,
         uint256 newPriceA,
-        uint256 fee
+        uint256 fee,
+        uint256 priceImpact
     );
 
     event MarketResolved(MarketOutcome outcome);
@@ -90,6 +95,12 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         uint256 amount
     );
 
+    event CPMMRebalanced(
+        uint256 newSharesA,
+        uint256 newSharesB,
+        uint256 newK
+    );
+
     modifier onlyFactory() {
         require(msg.sender == factory, "Only factory can call this");
         _;
@@ -97,7 +108,6 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
 
     constructor(
         bytes32 _marketId,
-        address _bettingToken,
         address _owner,
         string memory _question,
         string memory _optionA,
@@ -105,7 +115,6 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         uint256 _endTime
     ) {
         marketId = _marketId;
-        bettingToken = IERC20(_bettingToken);
         factory = msg.sender;
         _setupOwner(_owner);
         
@@ -129,69 +138,60 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Initialize market with equal probability (0.5 each)
-     * @param _initialLiquidity Initial liquidity amount (will be split equally)
+     * @notice Initialize market with equal probability (0.5 each) - CPMM setup
      */
-    function initializeMarket(uint256 _initialLiquidity) external nonReentrant {
+    function initializeMarket() external payable nonReentrant {
         require(!marketInfo.initialized, "Market already initialized");
         require(block.timestamp < marketInfo.endTime, "Market has ended");
-        require(_initialLiquidity > 0, "Initial liquidity must be positive");
+        require(msg.value >= MIN_LIQUIDITY, "Initial liquidity too low");
 
-        // Transfer tokens from initializer
-        require(
-            bettingToken.transferFrom(msg.sender, address(this), _initialLiquidity),
-            "Token transfer failed"
-        );
-
-        // Start with equal shares (0.5 probability each)
-        uint256 initialShares = sqrt(_initialLiquidity * PRECISION);
+        // Start with equal shares (0.5 probability each) for CPMM
+        // Using square root to ensure equal initial pricing
+        uint256 initialShares = sqrt(msg.value * PRECISION);
         
         marketInfo.sharesA = initialShares;
         marketInfo.sharesB = initialShares;
-        marketInfo.k = initialShares * initialShares;
+        marketInfo.k = initialShares * initialShares; // CPMM constant product
         marketInfo.initialized = true;
 
-        // Give LP tokens to initializer (using geometric mean)
+        // Give LP tokens to initializer (using geometric mean for fair distribution)
         uint256 lpTokensAmount = initialShares;
         lpTokens[msg.sender] = lpTokensAmount;
         marketInfo.totalLpTokens = lpTokensAmount;
 
-        emit LiquidityAdded(msg.sender, _initialLiquidity, lpTokensAmount);
+        emit LiquidityAdded(msg.sender, msg.value, lpTokensAmount);
+        emit CPMMRebalanced(initialShares, initialShares, marketInfo.k);
     }
 
     /**
-     * @notice Add liquidity to maintain current price ratio
+     * @notice Add liquidity to maintain current price ratio (CPMM liquidity provision)
      */
-    function addLiquidity(uint256 _amount) external nonReentrant {
+    function addLiquidity() external payable nonReentrant {
         require(marketInfo.initialized, "Market not initialized");
         require(!marketInfo.resolved, "Market already resolved");
         require(block.timestamp < marketInfo.endTime, "Market has ended");
-        require(_amount > 0, "Amount must be positive");
-
-        // Transfer tokens
-        require(
-            bettingToken.transferFrom(msg.sender, address(this), _amount),
-            "Token transfer failed"
-        );
+        require(msg.value > 0, "Amount must be positive");
 
         // Calculate LP tokens to mint proportional to current pool
-        uint256 lpTokensAmount = (_amount * marketInfo.totalLpTokens) / getTotalValue();
+        uint256 totalValue = getTotalValue();
+        uint256 lpTokensAmount = (msg.value * marketInfo.totalLpTokens) / totalValue;
 
-        // The new liquidity doesn't change the price, just adds depth
-        uint256 scaleFactor = (getTotalValue() + _amount) * PRECISION / getTotalValue();
+        // Scale both shares proportionally to maintain price (CPMM invariant)
+        uint256 scaleFactor = (totalValue + msg.value) * PRECISION / totalValue;
         marketInfo.sharesA = (marketInfo.sharesA * scaleFactor) / PRECISION;
         marketInfo.sharesB = (marketInfo.sharesB * scaleFactor) / PRECISION;
-        marketInfo.k = marketInfo.sharesA * marketInfo.sharesB;
+        marketInfo.k = marketInfo.sharesA * marketInfo.sharesB; // Update CPMM constant
 
         // Mint LP tokens
         lpTokens[msg.sender] += lpTokensAmount;
         marketInfo.totalLpTokens += lpTokensAmount;
 
-        emit LiquidityAdded(msg.sender, _amount, lpTokensAmount);
+        emit LiquidityAdded(msg.sender, msg.value, lpTokensAmount);
+        emit CPMMRebalanced(marketInfo.sharesA, marketInfo.sharesB, marketInfo.k);
     }
 
     /**
-     * @notice Remove liquidity proportionally
+     * @notice Remove liquidity proportionally (CPMM liquidity removal)
      */
     function removeLiquidity(uint256 _lpTokens) external nonReentrant {
         require(marketInfo.initialized, "Market not initialized");
@@ -201,51 +201,51 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         // Calculate proportional amount to withdraw
         uint256 totalValue = getTotalValue();
         uint256 amountOut = (_lpTokens * totalValue) / marketInfo.totalLpTokens;
+        
+        // Ensure minimum liquidity remains
+        require(totalValue - amountOut >= MIN_LIQUIDITY, "Would leave insufficient liquidity");
 
-        // Scale down shares proportionally
+        // Scale down shares proportionally (maintain CPMM ratio)
         uint256 scaleFactor = (totalValue - amountOut) * PRECISION / totalValue;
         marketInfo.sharesA = (marketInfo.sharesA * scaleFactor) / PRECISION;
         marketInfo.sharesB = (marketInfo.sharesB * scaleFactor) / PRECISION;
-        marketInfo.k = marketInfo.sharesA * marketInfo.sharesB;
+        marketInfo.k = marketInfo.sharesA * marketInfo.sharesB; // Update CPMM constant
 
         // Burn LP tokens
         lpTokens[msg.sender] -= _lpTokens;
         marketInfo.totalLpTokens -= _lpTokens;
 
-        // Transfer tokens back to user
-        require(bettingToken.transfer(msg.sender, amountOut), "Token transfer failed");
+        // Transfer native tokens back to user
+        (bool success, ) = payable(msg.sender).call{value: amountOut}("");
+        require(success, "Native token transfer failed");
 
         emit LiquidityRemoved(msg.sender, amountOut, _lpTokens);
+        emit CPMMRebalanced(marketInfo.sharesA, marketInfo.sharesB, marketInfo.k);
     }
 
     /**
-     * @notice Buy outcome tokens using betting tokens
+     * @notice Buy outcome tokens using native tokens (CPMM buy mechanism)
      */
     function buyTokens(
         bool _buyOptionA,
-        uint256 _amountIn,
         uint256 _minTokensOut
-    ) external nonReentrant {
+    ) external payable nonReentrant {
         require(marketInfo.initialized, "Market not initialized");
         require(!marketInfo.resolved, "Market already resolved");
         require(block.timestamp < marketInfo.endTime, "Market has ended");
-        require(_amountIn > 0, "Amount must be positive");
-
-        // Transfer betting tokens from user
-        require(
-            bettingToken.transferFrom(msg.sender, address(this), _amountIn),
-            "Token transfer failed"
-        );
+        require(msg.value > 0, "Amount must be positive");
 
         // Calculate fee
-        uint256 fee = (_amountIn * tradingFee) / FEE_DENOMINATOR;
-        uint256 amountInAfterFee = _amountIn - fee;
+        uint256 fee = (msg.value * tradingFee) / FEE_DENOMINATOR;
+        uint256 amountInAfterFee = msg.value - fee;
 
         uint256 tokensOut;
         uint256 newPriceA;
+        uint256 priceImpact;
+        uint256 oldPriceA = getPriceA();
 
         if (_buyOptionA) {
-            // Buying Option A decreases sharesA, increases sharesB
+            // CPMM: Buying Option A decreases sharesA, increases sharesB
             uint256 newSharesB = marketInfo.sharesB + amountInAfterFee;
             uint256 newSharesA = marketInfo.k / newSharesB;
             tokensOut = marketInfo.sharesA - newSharesA;
@@ -259,7 +259,7 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
             
             newPriceA = (newSharesB * PRECISION) / (newSharesA + newSharesB);
         } else {
-            // Buying Option B decreases sharesB, increases sharesA
+            // CPMM: Buying Option B decreases sharesB, increases sharesA
             uint256 newSharesA = marketInfo.sharesA + amountInAfterFee;
             uint256 newSharesB = marketInfo.k / newSharesA;
             tokensOut = marketInfo.sharesB - newSharesB;
@@ -274,11 +274,18 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
             newPriceA = (newSharesB * PRECISION) / (newSharesA + newSharesB);
         }
 
-        emit TokensBought(msg.sender, _buyOptionA, _amountIn, tokensOut, newPriceA, fee);
+        // Calculate price impact
+        priceImpact = oldPriceA > newPriceA ? 
+            ((oldPriceA - newPriceA) * FEE_DENOMINATOR) / oldPriceA :
+            ((newPriceA - oldPriceA) * FEE_DENOMINATOR) / oldPriceA;
+        
+        require(priceImpact <= MAX_PRICE_IMPACT, "Price impact too high");
+
+        emit TokensBought(msg.sender, _buyOptionA, msg.value, tokensOut, newPriceA, fee, priceImpact);
     }
 
     /**
-     * @notice Sell outcome tokens for betting tokens
+     * @notice Sell outcome tokens for native tokens (Enhanced CPMM sell mechanism)
      */
     function sellTokens(
         bool _sellOptionA,
@@ -292,14 +299,18 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
 
         uint256 amountOut;
         uint256 newPriceA;
+        uint256 priceImpact;
+        uint256 oldPriceA = getPriceA();
 
         if (_sellOptionA) {
             require(optionABalance[msg.sender] >= _tokensIn, "Insufficient Option A tokens");
             
-            // Selling Option A increases sharesA, decreases sharesB
+            // CPMM: Selling Option A increases sharesA, decreases sharesB
             uint256 newSharesA = marketInfo.sharesA + _tokensIn;
             uint256 newSharesB = marketInfo.k / newSharesA;
             amountOut = marketInfo.sharesB - newSharesB;
+            
+            require(newSharesB > 0, "Insufficient liquidity");
             
             marketInfo.sharesA = newSharesA;
             marketInfo.sharesB = newSharesB;
@@ -309,10 +320,12 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         } else {
             require(optionBBalance[msg.sender] >= _tokensIn, "Insufficient Option B tokens");
             
-            // Selling Option B increases sharesB, decreases sharesA
+            // CPMM: Selling Option B increases sharesB, decreases sharesA
             uint256 newSharesB = marketInfo.sharesB + _tokensIn;
             uint256 newSharesA = marketInfo.k / newSharesB;
             amountOut = marketInfo.sharesA - newSharesA;
+            
+            require(newSharesA > 0, "Insufficient liquidity");
             
             marketInfo.sharesA = newSharesA;
             marketInfo.sharesB = newSharesB;
@@ -321,22 +334,60 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
             newPriceA = (newSharesB * PRECISION) / (newSharesA + newSharesB);
         }
 
-        // Apply fee
+        // Apply trading fee
         uint256 fee = (amountOut * tradingFee) / FEE_DENOMINATOR;
         uint256 amountOutAfterFee = amountOut - fee;
         
         require(amountOutAfterFee >= _minAmountOut, "Slippage too high");
 
-        // Transfer betting tokens to user
-        require(bettingToken.transfer(msg.sender, amountOutAfterFee), "Token transfer failed");
+        // Calculate price impact
+        priceImpact = oldPriceA > newPriceA ? 
+            ((oldPriceA - newPriceA) * FEE_DENOMINATOR) / oldPriceA :
+            ((newPriceA - oldPriceA) * FEE_DENOMINATOR) / oldPriceA;
 
-        emit TokensSold(msg.sender, _sellOptionA, _tokensIn, amountOutAfterFee, newPriceA, fee);
+        // Transfer native tokens to user
+        (bool success, ) = payable(msg.sender).call{value: amountOutAfterFee}("");
+        require(success, "Native token transfer failed");
+
+        emit TokensSold(msg.sender, _sellOptionA, _tokensIn, amountOutAfterFee, newPriceA, fee, priceImpact);
+    }
+
+
+    /**
+     * @notice Market making function - automatically provide liquidity at current prices
+     */
+    function marketMake() external payable nonReentrant {
+        require(marketInfo.initialized, "Market not initialized");
+        require(!marketInfo.resolved, "Market already resolved");
+        require(block.timestamp < marketInfo.endTime, "Market has ended");
+        require(msg.value > 0, "Amount must be positive");
+
+        // Split the incoming ETH to maintain current price ratio
+        uint256 currentPriceA = getPriceA();
+        uint256 priceB = PRECISION - currentPriceA;
+        
+        // Allocate proportionally to current prices
+        uint256 amountForA = (msg.value * priceB) / PRECISION;
+        uint256 amountForB = msg.value - amountForA;
+        
+        // Add to both sides to maintain price
+        marketInfo.sharesA += amountForA;
+        marketInfo.sharesB += amountForB;
+        marketInfo.k = marketInfo.sharesA * marketInfo.sharesB;
+        
+        // Give LP tokens proportional to contribution
+        uint256 lpTokensAmount = (msg.value * marketInfo.totalLpTokens) / getTotalValue();
+        lpTokens[msg.sender] += lpTokensAmount;
+        marketInfo.totalLpTokens += lpTokensAmount;
+        
+        emit LiquidityAdded(msg.sender, msg.value, lpTokensAmount);
+        emit CPMMRebalanced(marketInfo.sharesA, marketInfo.sharesB, marketInfo.k);
     }
 
     /**
-     * @notice Get current price of Option A
+     * @notice Get current price of Option A (CPMM price calculation)
      */
-    function getPriceA() external view returns (uint256) {
+    function getPriceA() public view returns (uint256) {
         if (!marketInfo.initialized) return PRECISION / 2; // 0.5 default
         return (marketInfo.sharesB * PRECISION) / (marketInfo.sharesA + marketInfo.sharesB);
     }
@@ -345,27 +396,27 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
      * @notice Get current price of Option B
      */
     function getPriceB() external view returns (uint256) {
-        uint256 priceA = this.getPriceA();
-        return PRECISION - priceA;
+        return PRECISION - getPriceA();
     }
 
     /**
      * @notice Get both prices at once
      */
     function getCurrentPrices() external view returns (uint256 priceA, uint256 priceB) {
-        priceA = this.getPriceA();
+        priceA = getPriceA();
         priceB = PRECISION - priceA;
     }
 
     /**
-     * @notice Calculate buy outcome
+     * @notice Calculate buy outcome with price impact
      */
     function calculateBuyTokensOut(
         bool _buyOptionA,
         uint256 _amountIn
-    ) external view returns (uint256 tokensOut, uint256 fee, uint256 newPriceA) {
+    ) external view returns (uint256 tokensOut, uint256 fee, uint256 newPriceA, uint256 priceImpact) {
         require(marketInfo.initialized, "Market not initialized");
         
+        uint256 oldPriceA = getPriceA();
         fee = (_amountIn * tradingFee) / FEE_DENOMINATOR;
         uint256 amountInAfterFee = _amountIn - fee;
         
@@ -380,15 +431,19 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
             tokensOut = marketInfo.sharesB - newSharesB;
             newPriceA = (newSharesB * PRECISION) / (newSharesA + newSharesB);
         }
+        
+        priceImpact = oldPriceA > newPriceA ? 
+            ((oldPriceA - newPriceA) * FEE_DENOMINATOR) / oldPriceA :
+            ((newPriceA - oldPriceA) * FEE_DENOMINATOR) / oldPriceA;
     }
 
     /**
-     * @notice Calculate sell outcome
+     * @notice Calculate sell outcome with price impact
      */
     function calculateSellTokensOut(
         bool _sellOptionA,
         uint256 _tokensIn
-    ) external view returns (uint256 amountOut, uint256 fee, uint256 newPriceA) {
+    ) public view returns (uint256 amountOut, uint256 fee, uint256 newPriceA) {
         require(marketInfo.initialized, "Market not initialized");
         
         if (_sellOptionA) {
@@ -408,7 +463,34 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Get total value locked in the market
+     * @notice Get CPMM invariant and current state
+     */
+    function getCPMMState() external view returns (
+        uint256 sharesA,
+        uint256 sharesB,
+        uint256 k,
+        uint256 priceA,
+        uint256 priceB,
+        uint256 totalValue,
+        uint256 utilization
+    ) {
+        sharesA = marketInfo.sharesA;
+        sharesB = marketInfo.sharesB;
+        k = marketInfo.k;
+        priceA = getPriceA();
+        priceB = PRECISION - priceA;
+        totalValue = getTotalValue();
+        
+        // Calculate utilization (how much of the liquidity is being used)
+        if (totalValue > 0) {
+            uint256 balancedValue = 2 * sqrt(marketInfo.k);
+            utilization = totalValue > balancedValue ? 
+                ((totalValue - balancedValue) * PRECISION) / totalValue : 0;
+        }
+    }
+
+    /**
+     * @notice Get total value locked in the market (in native tokens)
      */
     function getTotalValue() public view returns (uint256) {
         if (!marketInfo.initialized) return 0;
@@ -451,8 +533,9 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         require(winningTokens > 0, "No winnings to claim");
         hasClaimed[msg.sender] = true;
 
-        // Winner gets 1:1 payout in betting tokens
-        require(bettingToken.transfer(msg.sender, winningTokens), "Token transfer failed");
+        // Winner gets 1:1 payout in native tokens
+        (bool success, ) = payable(msg.sender).call{value: winningTokens}("");
+        require(success, "Native token transfer failed");
 
         emit Claimed(msg.sender, winningTokens);
     }
@@ -480,7 +563,7 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         view 
         returns (uint256 sharesA, uint256 sharesB, uint256 k, uint256 priceA, uint256 priceB, bool initialized, uint256 endTime) 
     {
-        uint256 currentPriceA = this.getPriceA();
+        uint256 currentPriceA = getPriceA();
         return (
             marketInfo.sharesA, 
             marketInfo.sharesB, 
@@ -506,13 +589,14 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
      */
     function withdrawFees() external {
         require(msg.sender == owner(), "Only owner can withdraw fees");
-        uint256 balance = bettingToken.balanceOf(address(this));
+        uint256 balance = address(this).balance;
         uint256 totalLocked = getTotalValue();
         
         require(balance > totalLocked, "No fees to withdraw");
         uint256 fees = balance - totalLocked;
         
-        require(bettingToken.transfer(owner(), fees), "Token transfer failed");
+        (bool success, ) = payable(owner()).call{value: fees}("");
+        require(success, "Native token transfer failed");
     }
 
     /**
@@ -528,4 +612,8 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         }
         return y;
     }
+
+    // Allow contract to receive native tokens
+    receive() external payable {}
+    fallback() external payable {}
 }

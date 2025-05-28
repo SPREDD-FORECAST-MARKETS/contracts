@@ -2,17 +2,13 @@
 pragma solidity ^0.8.13;
 
 import {Ownable} from "@thirdweb-dev/contracts/extension/Ownable.sol";
-import {IERC20} from "@thirdweb-dev/contracts/eip/interface/IERC20.sol";
 import {BinaryAMMPredictionMarket} from "./SpreadMarket.sol";
-
 
 /**
  * @title BinaryPredictionMarketFactory
- * @dev Factory contract to deploy and manage binary prediction markets
+ * @dev Factory contract to deploy and manage binary prediction markets using native tokens (ETH)
  */
 contract BinaryPredictionMarketFactory is Ownable {
-    IERC20 public bettingToken;
-    
     // Market registry
     mapping(bytes32 => address) public markets;
     mapping(address => bytes32[]) public ownerMarkets;
@@ -32,8 +28,7 @@ contract BinaryPredictionMarketFactory is Ownable {
         uint256 endTime
     );
 
-    constructor(address _bettingToken) {
-        bettingToken = IERC20(_bettingToken);
+    constructor() {
         _setupOwner(msg.sender);
     }
 
@@ -42,7 +37,7 @@ contract BinaryPredictionMarketFactory is Ownable {
     }
 
     /**
-     * @notice Create a new binary prediction market
+     * @notice Create a new binary prediction market using native tokens
      * @param _question The market question
      * @param _optionA Option A description
      * @param _optionB Option B description
@@ -75,10 +70,9 @@ contract BinaryPredictionMarketFactory is Ownable {
 
         uint256 endTime = block.timestamp + _duration;
 
-        // Deploy new market contract
+        // Deploy new market contract (now uses native tokens)
         BinaryAMMPredictionMarket market = new BinaryAMMPredictionMarket(
             marketId,
-            address(bettingToken),
             msg.sender, // market owner
             _question,
             _optionA,
@@ -98,68 +92,12 @@ contract BinaryPredictionMarketFactory is Ownable {
         return (marketId, marketContract);
     }
 
-    /**
-     * @notice Get market contract address by ID
-     */
-    function getMarket(bytes32 _marketId) external view returns (address) {
-        return markets[_marketId];
-    }
-
-    /**
-     * @notice Get all markets created by an owner
-     */
-    function getOwnerMarkets(address _owner) external view returns (bytes32[] memory) {
-        return ownerMarkets[_owner];
-    }
-
-    /**
-     * @notice Get all market IDs
-     */
-    function getAllMarkets() external view returns (bytes32[] memory) {
-        return allMarkets;
-    }
 
     /**
      * @notice Get market count
      */
     function getMarketCount() external view returns (uint256) {
         return allMarkets.length;
-    }
-
-    /**
-     * @notice Get market info by ID
-     */
-    function getMarketInfo(bytes32 _marketId) external view returns (
-        address marketContract,
-        address marketOwner,
-        string memory question,
-        string memory optionA,
-        string memory optionB,
-        uint256 endTime,
-        bool initialized,
-        bool resolved
-    ) {
-        address marketAddr = markets[_marketId];
-        require(marketAddr != address(0), "Market does not exist");
-        
-        BinaryAMMPredictionMarket market = BinaryAMMPredictionMarket(marketAddr);
-        
-        marketContract = marketAddr;
-        marketOwner = market.owner();
-        
-        (
-            question,
-            endTime,
-            ,  // outcome - not needed here
-            optionA,
-            optionB,
-            ,  // sharesA - not needed here
-            ,  // sharesB - not needed here
-            ,  // k - not needed here
-            resolved,
-            initialized,
-            // totalLpTokens - not needed here
-        ) = market.marketInfo();
     }
 
     /**
@@ -176,48 +114,23 @@ contract BinaryPredictionMarketFactory is Ownable {
         address marketAddr = markets[_marketId];
         require(marketAddr != address(0), "Market does not exist");
         
-        BinaryAMMPredictionMarket market = BinaryAMMPredictionMarket(marketAddr);
+        BinaryAMMPredictionMarket market = BinaryAMMPredictionMarket(payable(marketAddr));
         return market.getCurrentPrices();
     }
 
     /**
-     * @notice Batch get market info for multiple markets
+     * @notice Get total value locked across all markets (in native tokens)
      */
-    function batchGetMarketInfo(bytes32[] calldata _marketIds) external view returns (
-        address[] memory marketContracts,
-        uint256[] memory pricesA,
-        uint256[] memory pricesB,
-        bool[] memory initialized,
-        bool[] memory resolved
-    ) {
-        uint256 length = _marketIds.length;
-        marketContracts = new address[](length);
-        pricesA = new uint256[](length);
-        pricesB = new uint256[](length);
-        initialized = new bool[](length);
-        resolved = new bool[](length);
-
-        for (uint256 i = 0; i < length; i++) {
-            address marketAddr = markets[_marketIds[i]];
+    function getTotalValueLocked() external view returns (uint256 total) {
+        for (uint256 i = 0; i < allMarkets.length; i++) {
+            address marketAddr = markets[allMarkets[i]];
             if (marketAddr != address(0)) {
-                BinaryAMMPredictionMarket market = BinaryAMMPredictionMarket(marketAddr);
-                marketContracts[i] = marketAddr;
-                (pricesA[i], pricesB[i]) = market.getCurrentPrices();
-                
-                (
-                    ,  // question
-                    ,  // endTime
-                    ,  // outcome
-                    ,  // optionA
-                    ,  // optionB
-                    ,  // sharesA
-                    ,  // sharesB
-                    ,  // k
-                    resolved[i],
-                    initialized[i],
-                    // totalLpTokens
-                ) = market.marketInfo();
+                total += marketAddr.balance;
             }
         }
     }
+
+    // Allow factory to receive native tokens (in case needed for forwarding)
+    receive() external payable {}
+    fallback() external payable {}
 }
