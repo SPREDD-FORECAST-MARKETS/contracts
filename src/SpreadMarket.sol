@@ -1,15 +1,18 @@
-// SPDX-License-Identifier: UNLICENSED
+// SPDX-License-Identifier: GPL-2.0-or-later
 pragma solidity ^0.8.13;
 
 import {ReentrancyGuard} from "@thirdweb-dev/contracts/external-deps/openzeppelin/security/ReentrancyGuard.sol";
 import {Ownable} from "@thirdweb-dev/contracts/extension/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /**
  * @title BinaryAMMPredictionMarket
- * @dev Individual binary prediction market contract with CPMM using native tokens
+ * @dev Individual binary prediction market contract with CPMM using ERC-20 tokens
  * Implements Constant Product Market Maker (x * y = k) for automated market making
  */
 contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     /// @notice Market prediction outcome enum
     enum MarketOutcome {
         UNRESOLVED,
@@ -35,6 +38,7 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
 
     bytes32 public immutable marketId;
     address public factory;
+    IERC20 public immutable token; // ERC-20 token used for trading
     
     MarketInfo public marketInfo;
     
@@ -49,7 +53,7 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     // Fee configuration (in basis points, e.g., 30 = 0.3%)
     uint256 public tradingFee = 30; // 0.3% trading fee
     uint256 public constant FEE_DENOMINATOR = 10000;
-    uint256 public constant PRECISION = 1e18;
+    uint256 public constant PRECISION = 1e6;
     
     // CPMM parameters
     uint256 public constant MIN_LIQUIDITY = 1000; // Minimum liquidity to prevent division by zero
@@ -109,6 +113,7 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     constructor(
         bytes32 _marketId,
         address _owner,
+        address _token,
         string memory _question,
         string memory _optionA,
         string memory _optionB,
@@ -116,6 +121,7 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     ) {
         marketId = _marketId;
         factory = msg.sender;
+        token = IERC20(_token);
         _setupOwner(_owner);
         
         marketInfo = MarketInfo({
@@ -140,14 +146,17 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     /**
      * @notice Initialize market with equal probability (0.5 each) - CPMM setup
      */
-    function initializeMarket() external payable nonReentrant {
+    function initializeMarket(uint256 _amount) external nonReentrant {
         require(!marketInfo.initialized, "Market already initialized");
         require(block.timestamp < marketInfo.endTime, "Market has ended");
-        require(msg.value >= MIN_LIQUIDITY, "Initial liquidity too low");
+        require(_amount >= MIN_LIQUIDITY, "Initial liquidity too low");
+
+        // Transfer tokens from user to contract
+        token.safeTransferFrom(msg.sender, address(this), _amount);
 
         // Start with equal shares (0.5 probability each) for CPMM
         // Using square root to ensure equal initial pricing
-        uint256 initialShares = sqrt(msg.value * PRECISION);
+        uint256 initialShares = sqrt(_amount * PRECISION);
         
         marketInfo.sharesA = initialShares;
         marketInfo.sharesB = initialShares;
@@ -159,25 +168,28 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         lpTokens[msg.sender] = lpTokensAmount;
         marketInfo.totalLpTokens = lpTokensAmount;
 
-        emit LiquidityAdded(msg.sender, msg.value, lpTokensAmount);
+        emit LiquidityAdded(msg.sender, _amount, lpTokensAmount);
         emit CPMMRebalanced(initialShares, initialShares, marketInfo.k);
     }
 
     /**
      * @notice Add liquidity to maintain current price ratio (CPMM liquidity provision)
      */
-    function addLiquidity() external payable nonReentrant {
+    function addLiquidity(uint256 _amount) external nonReentrant {
         require(marketInfo.initialized, "Market not initialized");
         require(!marketInfo.resolved, "Market already resolved");
         require(block.timestamp < marketInfo.endTime, "Market has ended");
-        require(msg.value > 0, "Amount must be positive");
+        require(_amount > 0, "Amount must be positive");
+
+        // Transfer tokens from user to contract
+        token.safeTransferFrom(msg.sender, address(this), _amount);
 
         // Calculate LP tokens to mint proportional to current pool
         uint256 totalValue = getTotalValue();
-        uint256 lpTokensAmount = (msg.value * marketInfo.totalLpTokens) / totalValue;
+        uint256 lpTokensAmount = (_amount * marketInfo.totalLpTokens) / totalValue;
 
         // Scale both shares proportionally to maintain price (CPMM invariant)
-        uint256 scaleFactor = (totalValue + msg.value) * PRECISION / totalValue;
+        uint256 scaleFactor = (totalValue + _amount) * PRECISION / totalValue;
         marketInfo.sharesA = (marketInfo.sharesA * scaleFactor) / PRECISION;
         marketInfo.sharesB = (marketInfo.sharesB * scaleFactor) / PRECISION;
         marketInfo.k = marketInfo.sharesA * marketInfo.sharesB; // Update CPMM constant
@@ -186,7 +198,7 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         lpTokens[msg.sender] += lpTokensAmount;
         marketInfo.totalLpTokens += lpTokensAmount;
 
-        emit LiquidityAdded(msg.sender, msg.value, lpTokensAmount);
+        emit LiquidityAdded(msg.sender, _amount, lpTokensAmount);
         emit CPMMRebalanced(marketInfo.sharesA, marketInfo.sharesB, marketInfo.k);
     }
 
@@ -215,29 +227,32 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         lpTokens[msg.sender] -= _lpTokens;
         marketInfo.totalLpTokens -= _lpTokens;
 
-        // Transfer native tokens back to user
-        (bool success, ) = payable(msg.sender).call{value: amountOut}("");
-        require(success, "Native token transfer failed");
+        // Transfer ERC-20 tokens back to user
+        token.safeTransfer(msg.sender, amountOut);
 
         emit LiquidityRemoved(msg.sender, amountOut, _lpTokens);
         emit CPMMRebalanced(marketInfo.sharesA, marketInfo.sharesB, marketInfo.k);
     }
 
     /**
-     * @notice Buy outcome tokens using native tokens (CPMM buy mechanism)
+     * @notice Buy outcome tokens using ERC-20 tokens (CPMM buy mechanism)
      */
     function buyTokens(
         bool _buyOptionA,
+        uint256 _amount,
         uint256 _minTokensOut
-    ) external payable nonReentrant {
+    ) external nonReentrant {
         require(marketInfo.initialized, "Market not initialized");
         require(!marketInfo.resolved, "Market already resolved");
         require(block.timestamp < marketInfo.endTime, "Market has ended");
-        require(msg.value > 0, "Amount must be positive");
+        require(_amount > 0, "Amount must be positive");
+
+        // Transfer tokens from user to contract
+        token.safeTransferFrom(msg.sender, address(this), _amount);
 
         // Calculate fee
-        uint256 fee = (msg.value * tradingFee) / FEE_DENOMINATOR;
-        uint256 amountInAfterFee = msg.value - fee;
+        uint256 fee = (_amount * tradingFee) / FEE_DENOMINATOR;
+        uint256 amountInAfterFee = _amount - fee;
 
         uint256 tokensOut;
         uint256 newPriceA;
@@ -281,11 +296,11 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         
         require(priceImpact <= MAX_PRICE_IMPACT, "Price impact too high");
 
-        emit TokensBought(msg.sender, _buyOptionA, msg.value, tokensOut, newPriceA, fee, priceImpact);
+        emit TokensBought(msg.sender, _buyOptionA, _amount, tokensOut, newPriceA, fee, priceImpact);
     }
 
     /**
-     * @notice Sell outcome tokens for native tokens (Enhanced CPMM sell mechanism)
+     * @notice Sell outcome tokens for ERC-20 tokens (Enhanced CPMM sell mechanism)
      */
     function sellTokens(
         bool _sellOptionA,
@@ -345,30 +360,31 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
             ((oldPriceA - newPriceA) * FEE_DENOMINATOR) / oldPriceA :
             ((newPriceA - oldPriceA) * FEE_DENOMINATOR) / oldPriceA;
 
-        // Transfer native tokens to user
-        (bool success, ) = payable(msg.sender).call{value: amountOutAfterFee}("");
-        require(success, "Native token transfer failed");
+        // Transfer ERC-20 tokens to user
+        token.safeTransfer(msg.sender, amountOutAfterFee);
 
         emit TokensSold(msg.sender, _sellOptionA, _tokensIn, amountOutAfterFee, newPriceA, fee, priceImpact);
     }
 
-
     /**
      * @notice Market making function - automatically provide liquidity at current prices
      */
-    function marketMake() external payable nonReentrant {
+    function marketMake(uint256 _amount) external nonReentrant {
         require(marketInfo.initialized, "Market not initialized");
         require(!marketInfo.resolved, "Market already resolved");
         require(block.timestamp < marketInfo.endTime, "Market has ended");
-        require(msg.value > 0, "Amount must be positive");
+        require(_amount > 0, "Amount must be positive");
 
-        // Split the incoming ETH to maintain current price ratio
+        // Transfer tokens from user to contract
+        token.safeTransferFrom(msg.sender, address(this), _amount);
+
+        // Split the incoming tokens to maintain current price ratio
         uint256 currentPriceA = getPriceA();
         uint256 priceB = PRECISION - currentPriceA;
         
         // Allocate proportionally to current prices
-        uint256 amountForA = (msg.value * priceB) / PRECISION;
-        uint256 amountForB = msg.value - amountForA;
+        uint256 amountForA = (_amount * priceB) / PRECISION;
+        uint256 amountForB = _amount - amountForA;
         
         // Add to both sides to maintain price
         marketInfo.sharesA += amountForA;
@@ -376,11 +392,11 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         marketInfo.k = marketInfo.sharesA * marketInfo.sharesB;
         
         // Give LP tokens proportional to contribution
-        uint256 lpTokensAmount = (msg.value * marketInfo.totalLpTokens) / getTotalValue();
+        uint256 lpTokensAmount = (_amount * marketInfo.totalLpTokens) / getTotalValue();
         lpTokens[msg.sender] += lpTokensAmount;
         marketInfo.totalLpTokens += lpTokensAmount;
         
-        emit LiquidityAdded(msg.sender, msg.value, lpTokensAmount);
+        emit LiquidityAdded(msg.sender, _amount, lpTokensAmount);
         emit CPMMRebalanced(marketInfo.sharesA, marketInfo.sharesB, marketInfo.k);
     }
 
@@ -490,7 +506,7 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Get total value locked in the market (in native tokens)
+     * @notice Get total value locked in the market (in ERC-20 tokens)
      */
     function getTotalValue() public view returns (uint256) {
         if (!marketInfo.initialized) return 0;
@@ -533,9 +549,8 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         require(winningTokens > 0, "No winnings to claim");
         hasClaimed[msg.sender] = true;
 
-        // Winner gets 1:1 payout in native tokens
-        (bool success, ) = payable(msg.sender).call{value: winningTokens}("");
-        require(success, "Native token transfer failed");
+        // Winner gets 1:1 payout in ERC-20 tokens
+        token.safeTransfer(msg.sender, winningTokens);
 
         emit Claimed(msg.sender, winningTokens);
     }
@@ -589,14 +604,20 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
      */
     function withdrawFees() external {
         require(msg.sender == owner(), "Only owner can withdraw fees");
-        uint256 balance = address(this).balance;
+        uint256 balance = token.balanceOf(address(this));
         uint256 totalLocked = getTotalValue();
         
         require(balance > totalLocked, "No fees to withdraw");
         uint256 fees = balance - totalLocked;
         
-        (bool success, ) = payable(owner()).call{value: fees}("");
-        require(success, "Native token transfer failed");
+        token.safeTransfer(owner(), fees);
+    }
+
+    /**
+     * @notice Get the ERC-20 token address used by this market
+     */
+    function getTokenAddress() external view returns (address) {
+        return address(token);
     }
 
     /**
@@ -612,8 +633,4 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         }
         return y;
     }
-
-    // Allow contract to receive native tokens
-    receive() external payable {}
-    fallback() external payable {}
 }
