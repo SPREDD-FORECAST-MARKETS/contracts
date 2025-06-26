@@ -4,12 +4,12 @@ pragma solidity ^0.8.13;
 import {ReentrancyGuard} from "@thirdweb-dev/contracts/external-deps/openzeppelin/security/ReentrancyGuard.sol";
 import {Ownable} from "@thirdweb-dev/contracts/extension/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {WeeklyForecastPointManager} from "./FPManager.sol";
 
 /**
  * @title BinaryAMMPredictionMarket
  * @dev Individual binary prediction market contract with CPMM using ERC-20 tokens
  * Implements Constant Product Market Maker (x * y = k) for automated market making
+ * Integrated with WeeklyForecastPointManager for FP tracking
  */
 contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -37,11 +37,17 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         uint256 totalLpTokens;
     }
 
+    /// @notice User position tracking for FP calculation
+    struct UserPosition {
+        uint256 firstPositionTime;    // When user first bought tokens in this market
+        bool hasPosition;             // Whether user has any position
+    }
+
     bytes32 public immutable marketId;
     address public factory;
     IERC20 public immutable token; // ERC-20 token used for trading
-
-    WeeklyForecastPointManager public immutable fpManager;
+    uint256 public immutable marketCreationTime; // When market was created
+    address public immutable fpManager; // FP Manager contract
     
     MarketInfo public marketInfo;
     
@@ -49,6 +55,12 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     mapping(address => uint256) public optionABalance;
     mapping(address => uint256) public optionBBalance;
     mapping(address => bool) public hasClaimed;
+    
+    // FP tracking - user positions and timing
+    mapping(address => UserPosition) public userPositions;
+    address[] public usersWithPositions; // Array of all users who have positions
+    mapping(address => bool) public isUserTracked; // To avoid duplicate entries
+    uint256 public totalTradeCount; // Total number of trades in this market
     
     // Liquidity provider tracking
     mapping(address => uint256) public lpTokens;
@@ -108,6 +120,11 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         uint256 newK
     );
 
+    event UserPositionTracked(
+        address indexed user,
+        uint256 firstPositionTime
+    );
+
     modifier onlyFactory() {
         require(msg.sender == factory, "Only factory can call this");
         _;
@@ -123,9 +140,13 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         uint256 _endTime,
         address _fpManager
     ) {
+        require(_fpManager != address(0), "Invalid FP Manager address");
+        
         marketId = _marketId;
         factory = msg.sender;
         token = IERC20(_token);
+        marketCreationTime = block.timestamp;
+        fpManager = _fpManager;
         _setupOwner(_owner);
         
         marketInfo = MarketInfo({
@@ -141,12 +162,50 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
             initialized: false,
             totalLpTokens: 0
         });
-
-        fpManager = WeeklyForecastPointManager(_fpManager);
     }
 
     function _canSetOwner() internal view virtual override returns (bool) {
         return msg.sender == owner();
+    }
+
+    /**
+     * @notice Track user position for FP calculation
+     */
+    function _trackUserPosition(address _user) internal {
+        if (!userPositions[_user].hasPosition) {
+            userPositions[_user] = UserPosition({
+                firstPositionTime: block.timestamp,
+                hasPosition: true
+            });
+            
+            // Add to users array if not already tracked
+            if (!isUserTracked[_user]) {
+                usersWithPositions.push(_user);
+                isUserTracked[_user] = true;
+            }
+            
+            emit UserPositionTracked(_user, block.timestamp);
+        }
+    }
+
+    /**
+     * @notice Award creator FP for trading activity
+     */
+    function _awardCreatorFP() internal {
+        // Call FP Manager to award creator points
+        (bool success, ) = fpManager.call(
+            abi.encodeWithSignature(
+                "awardCreatorFP(address,bytes32,uint256,uint256)",
+                owner(),
+                marketId,
+                getTotalValue(),
+                totalTradeCount
+            )
+        );
+        // Don't revert if FP award fails to avoid breaking core functionality
+        if (!success) {
+            // Could emit an event for monitoring
+        }
     }
 
     /**
@@ -253,6 +312,9 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         require(block.timestamp < marketInfo.endTime, "Market has ended");
         require(_amount > 0, "Amount must be positive");
 
+        // Track user position for FP calculation
+        _trackUserPosition(msg.sender);
+
         // Transfer tokens from user to contract
         token.safeTransferFrom(msg.sender, address(this), _amount);
 
@@ -302,13 +364,9 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         
         require(priceImpact <= MAX_PRICE_IMPACT, "Price impact too high");
 
-
-        fpManager.awardCreatorFP(
-            owner(),                    // market creator
-            marketId,                   // market ID
-            getTotalValue(),            // current market volume
-            1                          // increment trade count by 1
-        );
+        // Increment trade count and award creator FP
+        totalTradeCount++;
+        _awardCreatorFP();
 
         emit TokensBought(msg.sender, _buyOptionA, _amount, tokensOut, newPriceA, fee, priceImpact);
     }
@@ -374,73 +432,14 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
             ((oldPriceA - newPriceA) * FEE_DENOMINATOR) / oldPriceA :
             ((newPriceA - oldPriceA) * FEE_DENOMINATOR) / oldPriceA;
 
+        // Increment trade count and award creator FP
+        totalTradeCount++;
+        _awardCreatorFP();
+
         // Transfer ERC-20 tokens to user
         token.safeTransfer(msg.sender, amountOutAfterFee);
 
-        fpManager.awardCreatorFP(
-            owner(),                    // market creator
-            marketId,                   // market ID
-            getTotalValue(),            // current market volume
-            1                          // increment trade count by 1
-        );
-
         emit TokensSold(msg.sender, _sellOptionA, _tokensIn, amountOutAfterFee, newPriceA, fee, priceImpact);
-    }
-
-
-    /**
-     * @notice Award FP to winning traders
-     */
-    function _awardTraderFP(MarketOutcome _outcome) internal {
-        // Determine correct side liquidity
-        uint256 correctSideLiquidity = _outcome == MarketOutcome.OPTION_A ? 
-            marketInfo.sharesA : marketInfo.sharesB;
-        
-        uint256 totalLiquidity = marketInfo.sharesA + marketInfo.sharesB;
-        uint256 marketDuration = marketInfo.endTime - block.timestamp; // When market was created
-        uint256 marketVolume = getTotalValue();
-        
-        // Iterate through all users who have positions
-        // Note: In production, you might want to limit this or use events to track users
-        address[] memory usersToCheck = _getAllUsersWithPositions();
-        
-        for (uint256 i = 0; i < usersToCheck.length; i++) {
-            address user = usersToCheck[i];
-            UserPosition memory position = userPositions[user];
-            
-            // Check if user has winning tokens
-            uint256 winningTokens = _outcome == MarketOutcome.OPTION_A ? 
-                position.optionAAmount : position.optionBAmount;
-                
-            if (winningTokens > 0) {
-                // Award trader FP
-                fpManager.awardTraderFP(
-                    user,                           // trader address
-                    marketId,                       // market ID
-                    marketVolume,                   // total market volume
-                    position.firstPositionTime,     // when user first bought
-                    block.timestamp - marketDuration, // market creation time (approximate)
-                    marketDuration,                 // market duration
-                    correctSideLiquidity,          // correct side liquidity
-                    totalLiquidity,                // total liquidity
-                    winningTokens                  // user's winning position size
-                );
-            }
-        }
-    }
-
-    /**
-     * @notice Get all users with positions (you need to track this)
-     * In production, consider using events or a more efficient tracking method
-     */
-    function _getAllUsersWithPositions() internal view returns (address[] memory) {
-        // This is simplified - you'd need to track users more efficiently
-        // Option 1: Track users in an array when they first buy
-        // Option 2: Use events and query off-chain
-        // Option 3: Iterate through a pre-known set of addresses
-        
-        // For now, returning empty array - implement based on your tracking method
-        return new address[](0);
     }
 
     /**
@@ -475,6 +474,67 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         
         emit LiquidityAdded(msg.sender, _amount, lpTokensAmount);
         emit CPMMRebalanced(marketInfo.sharesA, marketInfo.sharesB, marketInfo.k);
+    }
+
+    /**
+     * @notice Resolve market with outcome and award FP to winners
+     */
+    function resolveMarket(MarketOutcome _outcome) external {
+        require(msg.sender == owner(), "Only owner can resolve market");
+        require(block.timestamp >= marketInfo.endTime, "Market hasn't ended yet");
+        require(!marketInfo.resolved, "Market already resolved");
+        require(_outcome != MarketOutcome.UNRESOLVED, "Invalid outcome");
+
+        marketInfo.outcome = _outcome;
+        marketInfo.resolved = true;
+
+        // Award FP to all winning traders
+        _awardTraderFP(_outcome);
+
+        emit MarketResolved(_outcome);
+    }
+
+    /**
+     * @notice Award FP to winning traders
+     */
+    function _awardTraderFP(MarketOutcome _outcome) internal {
+        // Determine correct side liquidity for FP calculation
+        uint256 correctSideLiquidity = _outcome == MarketOutcome.OPTION_A ? 
+            marketInfo.sharesA : marketInfo.sharesB;
+        
+        uint256 totalLiquidity = marketInfo.sharesA + marketInfo.sharesB;
+        uint256 marketDuration = marketInfo.endTime - marketCreationTime;
+        uint256 marketVolume = getTotalValue();
+        
+        // Iterate through all users with positions
+        for (uint256 i = 0; i < usersWithPositions.length; i++) {
+            address user = usersWithPositions[i];
+            UserPosition memory position = userPositions[user];
+            
+            // Get user's winning token amount
+            uint256 winningTokens = _outcome == MarketOutcome.OPTION_A ? 
+                optionABalance[user] : optionBBalance[user];
+                
+            // Award FP only if user has winning tokens
+            if (winningTokens > 0) {
+                // Call FP Manager to award trader points
+                (bool success, ) = fpManager.call(
+                    abi.encodeWithSignature(
+                        "awardTraderFP(address,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256)",
+                        user,                           // trader address
+                        marketId,                       // market ID
+                        marketVolume,                   // total market volume
+                        position.firstPositionTime,     // when user first bought tokens
+                        marketCreationTime,             // when market was created
+                        marketDuration,                 // market duration
+                        correctSideLiquidity,          // correct side liquidity
+                        totalLiquidity,                // total liquidity
+                        winningTokens                  // user's winning position size
+                    )
+                );
+                // Don't revert if FP award fails to avoid breaking core functionality
+            }
+        }
     }
 
     /**
@@ -591,21 +651,6 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Resolve market with outcome (only owner)
-     */
-    function resolveMarket(MarketOutcome _outcome) external {
-        require(msg.sender == owner(), "Only owner can resolve market");
-        require(block.timestamp >= marketInfo.endTime, "Market hasn't ended yet");
-        require(!marketInfo.resolved, "Market already resolved");
-        require(_outcome != MarketOutcome.UNRESOLVED, "Invalid outcome");
-
-        marketInfo.outcome = _outcome;
-        marketInfo.resolved = true;
-
-        emit MarketResolved(_outcome);
-    }
-
-    /**
      * @notice Claim winnings after market resolution
      */
     function claimWinnings() external nonReentrant {
@@ -648,6 +693,23 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @notice Get user's position info for FP tracking
+     */
+    function getUserPosition(address _user) 
+        external 
+        view 
+        returns (uint256 firstPositionTime, bool hasPosition, uint256 optionA, uint256 optionB) 
+    {
+        UserPosition memory position = userPositions[_user];
+        return (
+            position.firstPositionTime,
+            position.hasPosition,
+            optionABalance[_user],
+            optionBBalance[_user]
+        );
+    }
+
+    /**
      * @notice Get market AMM state
      */
     function getMarketState() 
@@ -665,6 +727,46 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
             marketInfo.initialized,
             marketInfo.endTime
         );
+    }
+
+    /**
+     * @notice Get market info including FP tracking data
+     */
+    function getMarketInfoWithFP() 
+        external 
+        view 
+        returns (
+            string memory question,
+            string memory optionA,
+            string memory optionB,
+            uint256 endTime,
+            MarketOutcome outcome,
+            bool resolved,
+            bool initialized,
+            uint256 totalTrades,
+            uint256 usersCount,
+            uint256 creationTime
+        ) 
+    {
+        return (
+            marketInfo.question,
+            marketInfo.optionA,
+            marketInfo.optionB,
+            marketInfo.endTime,
+            marketInfo.outcome,
+            marketInfo.resolved,
+            marketInfo.initialized,
+            totalTradeCount,
+            usersWithPositions.length,
+            marketCreationTime
+        );
+    }
+
+    /**
+     * @notice Get all users with positions (for FP calculation)
+     */
+    function getUsersWithPositions() external view returns (address[] memory) {
+        return usersWithPositions;
     }
 
     /**
@@ -695,6 +797,13 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
      */
     function getTokenAddress() external view returns (address) {
         return address(token);
+    }
+
+    /**
+     * @notice Get FP Manager address
+     */
+    function getFPManagerAddress() external view returns (address) {
+        return fpManager;
     }
 
     /**

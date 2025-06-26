@@ -136,7 +136,8 @@ contract BinaryPredictionMarketFactory is Ownable {
             _question,
             _optionA,
             _optionB,
-            endTime
+            endTime,
+            address(fpManager)
         );
 
         marketContract = address(market);
