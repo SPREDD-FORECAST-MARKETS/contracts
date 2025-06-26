@@ -4,6 +4,7 @@ pragma solidity ^0.8.13;
 import {ReentrancyGuard} from "@thirdweb-dev/contracts/external-deps/openzeppelin/security/ReentrancyGuard.sol";
 import {Ownable} from "@thirdweb-dev/contracts/extension/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {WeeklyForecastPointManager} from "./FPManager.sol";
 
 /**
  * @title BinaryAMMPredictionMarket
@@ -39,6 +40,8 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
     bytes32 public immutable marketId;
     address public factory;
     IERC20 public immutable token; // ERC-20 token used for trading
+
+    WeeklyForecastPointManager public immutable fpManager;
     
     MarketInfo public marketInfo;
     
@@ -117,7 +120,8 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         string memory _question,
         string memory _optionA,
         string memory _optionB,
-        uint256 _endTime
+        uint256 _endTime,
+        address _fpManager
     ) {
         marketId = _marketId;
         factory = msg.sender;
@@ -137,6 +141,8 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
             initialized: false,
             totalLpTokens: 0
         });
+
+        fpManager = WeeklyForecastPointManager(_fpManager);
     }
 
     function _canSetOwner() internal view virtual override returns (bool) {
@@ -296,6 +302,14 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         
         require(priceImpact <= MAX_PRICE_IMPACT, "Price impact too high");
 
+
+        fpManager.awardCreatorFP(
+            owner(),                    // market creator
+            marketId,                   // market ID
+            getTotalValue(),            // current market volume
+            1                          // increment trade count by 1
+        );
+
         emit TokensBought(msg.sender, _buyOptionA, _amount, tokensOut, newPriceA, fee, priceImpact);
     }
 
@@ -363,7 +377,70 @@ contract BinaryAMMPredictionMarket is Ownable, ReentrancyGuard {
         // Transfer ERC-20 tokens to user
         token.safeTransfer(msg.sender, amountOutAfterFee);
 
+        fpManager.awardCreatorFP(
+            owner(),                    // market creator
+            marketId,                   // market ID
+            getTotalValue(),            // current market volume
+            1                          // increment trade count by 1
+        );
+
         emit TokensSold(msg.sender, _sellOptionA, _tokensIn, amountOutAfterFee, newPriceA, fee, priceImpact);
+    }
+
+
+    /**
+     * @notice Award FP to winning traders
+     */
+    function _awardTraderFP(MarketOutcome _outcome) internal {
+        // Determine correct side liquidity
+        uint256 correctSideLiquidity = _outcome == MarketOutcome.OPTION_A ? 
+            marketInfo.sharesA : marketInfo.sharesB;
+        
+        uint256 totalLiquidity = marketInfo.sharesA + marketInfo.sharesB;
+        uint256 marketDuration = marketInfo.endTime - block.timestamp; // When market was created
+        uint256 marketVolume = getTotalValue();
+        
+        // Iterate through all users who have positions
+        // Note: In production, you might want to limit this or use events to track users
+        address[] memory usersToCheck = _getAllUsersWithPositions();
+        
+        for (uint256 i = 0; i < usersToCheck.length; i++) {
+            address user = usersToCheck[i];
+            UserPosition memory position = userPositions[user];
+            
+            // Check if user has winning tokens
+            uint256 winningTokens = _outcome == MarketOutcome.OPTION_A ? 
+                position.optionAAmount : position.optionBAmount;
+                
+            if (winningTokens > 0) {
+                // Award trader FP
+                fpManager.awardTraderFP(
+                    user,                           // trader address
+                    marketId,                       // market ID
+                    marketVolume,                   // total market volume
+                    position.firstPositionTime,     // when user first bought
+                    block.timestamp - marketDuration, // market creation time (approximate)
+                    marketDuration,                 // market duration
+                    correctSideLiquidity,          // correct side liquidity
+                    totalLiquidity,                // total liquidity
+                    winningTokens                  // user's winning position size
+                );
+            }
+        }
+    }
+
+    /**
+     * @notice Get all users with positions (you need to track this)
+     * In production, consider using events or a more efficient tracking method
+     */
+    function _getAllUsersWithPositions() internal view returns (address[] memory) {
+        // This is simplified - you'd need to track users more efficiently
+        // Option 1: Track users in an array when they first buy
+        // Option 2: Use events and query off-chain
+        // Option 3: Iterate through a pre-known set of addresses
+        
+        // For now, returning empty array - implement based on your tracking method
+        return new address[](0);
     }
 
     /**

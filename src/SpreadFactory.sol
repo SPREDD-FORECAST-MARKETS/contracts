@@ -4,6 +4,7 @@ pragma solidity ^0.8.13;
 import {Ownable} from "@thirdweb-dev/contracts/extension/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {BinaryAMMPredictionMarket} from "./SpreadMarket.sol";
+import {WeeklyForecastPointManager} from "./FPManager.sol";
 
 /**
  * @title BinaryPredictionMarketFactory
@@ -18,6 +19,8 @@ contract BinaryPredictionMarketFactory is Ownable {
     mapping(address => bytes32[]) public ownerMarkets;
     mapping(address => bytes32[]) public tokenMarkets; // Markets by token address
     bytes32[] public allMarkets;
+
+    WeeklyForecastPointManager public fpManager;
 
     // Trading Token
     address public tradingToken;
@@ -144,9 +147,25 @@ contract BinaryPredictionMarketFactory is Ownable {
         tokenMarkets[this.tradingToken()].push(marketId);
         allMarkets.push(marketId);
 
+        fpManager.awardCreatorFP(
+            msg.sender,      // creator
+            marketId,        // market ID
+            0,              // initial volume = 0
+            0               // initial trade count = 0
+        );
+
         emit MarketCreated(marketId, marketContract, msg.sender, this.tradingToken(), _question, _optionA, _optionB, endTime);
 
         return (marketId, marketContract);
+    }
+
+    /**
+     * @notice Set FP Manager
+     * @param _fpManager The FP Manager contract address
+     */
+    function setFPManager(address _fpManager) external {
+        require(msg.sender == owner(), "only owner can call this method");
+        fpManager = WeeklyForecastPointManager(_fpManager);
     }
 
     /**
