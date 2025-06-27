@@ -3,7 +3,7 @@ pragma solidity ^0.8.13;
 
 import {Ownable} from "@thirdweb-dev/contracts/extension/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {BinaryAMMPredictionMarket} from "./SpreadMarket.sol";
+import {BinaryAMMPredictionMarket} from "./SpreddMarket.sol";
 import {WeeklyForecastPointManager} from "./FPManager.sol";
 
 /**
@@ -154,6 +154,8 @@ contract BinaryPredictionMarketFactory is Ownable {
             0,              // initial volume = 0
             0               // initial trade count = 0
         );
+
+        fpManager.setAuthorizedContract(marketContract, true);
 
         emit MarketCreated(marketId, marketContract, msg.sender, this.tradingToken(), _question, _optionA, _optionB, endTime);
 

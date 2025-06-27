@@ -4,8 +4,8 @@ pragma solidity ^0.8.19;
 import "forge-std/Test.sol";
 import "forge-std/console.sol";
 import "../src/Token.sol";
-import "../src/SpreadFactory.sol";
-import "../src/SpreadMarket.sol";
+import "../src/SpreddFactory.sol";
+import "../src/SpreddMarket.sol";
 import "../src/FPManager.sol";
 
 contract ForecastPointTest is Test {

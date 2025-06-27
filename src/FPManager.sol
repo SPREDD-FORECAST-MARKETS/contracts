@@ -39,6 +39,9 @@ contract WeeklyForecastPointManager is Ownable {
     
     // Authorized contracts (markets and factory)
     mapping(address => bool) public authorizedContracts;
+
+    address public spreddFactory;
+
     
     // Current week leaderboard tracking
     address[] public currentTraders;
@@ -100,9 +103,18 @@ contract WeeklyForecastPointManager is Ownable {
      * @notice Authorize/deauthorize contracts to interact with FP manager
      */
     function setAuthorizedContract(address _contract, bool _authorized) external {
-        require(msg.sender == owner(), "Only owner can authorize contracts");
+        require(msg.sender == spreddFactory, "Only owner can authorize contracts");
         authorizedContracts[_contract] = _authorized;
         emit ContractAuthorized(_contract, _authorized);
+    }
+
+
+    /**
+     * @notice Set Spredd Factory to authorize contracts
+     */
+    function setSpreddFactory(address _spreddFactory) external {
+        require(msg.sender == owner(), "Only owner can set factory");
+        spreddFactory = _spreddFactory;
     }
 
     /**
