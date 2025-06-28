@@ -115,6 +115,7 @@ contract WeeklyForecastPointManager is Ownable {
     function setSpreddFactory(address _spreddFactory) external {
         require(msg.sender == owner(), "Only owner can set factory");
         spreddFactory = _spreddFactory;
+        authorizedContracts[spreddFactory] = true;
     }
 
     /**

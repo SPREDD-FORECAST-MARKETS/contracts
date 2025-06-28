@@ -148,6 +148,8 @@ contract BinaryPredictionMarketFactory is Ownable {
         tokenMarkets[this.tradingToken()].push(marketId);
         allMarkets.push(marketId);
 
+        fpManager.setAuthorizedContract(address(marketContract), true);
+
         fpManager.awardCreatorFP(
             msg.sender,      // creator
             marketId,        // market ID
@@ -155,7 +157,6 @@ contract BinaryPredictionMarketFactory is Ownable {
             0               // initial trade count = 0
         );
 
-        fpManager.setAuthorizedContract(marketContract, true);
 
         emit MarketCreated(marketId, marketContract, msg.sender, this.tradingToken(), _question, _optionA, _optionB, endTime);
 
