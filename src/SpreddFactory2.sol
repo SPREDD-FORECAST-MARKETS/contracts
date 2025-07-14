@@ -128,9 +128,9 @@ contract SpreddMarketFactory is Ownable {
         string memory _question,
         string memory _optionA,
         string memory _optionB,
-        uint256 _duration
+        uint256 _endTime
     ) external payable returns (bytes32 marketId, address marketContract) {
-        require(_duration > 0, "Duration must be positive");
+        require(_endTime > block.timestamp, "End time must be in the future");
         require(bytes(_optionA).length > 0 && bytes(_optionB).length > 0, "Options cannot be empty");
         require(bytes(_question).length > 0, "Question cannot be empty");
         require(msg.value == marketCreationFee, "Incorrect fee amount");
@@ -149,7 +149,7 @@ contract SpreddMarketFactory is Ownable {
         // Ensure uniqueness (should be extremely rare to collide)
         require(markets[marketId] == address(0), "Market ID collision");
 
-        uint256 endTime = block.timestamp + _duration;
+        uint256 endTime = block.timestamp;
 
         // Deploy new bet-based market contract
         SpreddMarket market = new SpreddMarket(
@@ -159,7 +159,7 @@ contract SpreddMarketFactory is Ownable {
             _question,
             _optionA,
             _optionB,
-            endTime,
+            _endTime,
             address(fpManager)
         );
 
