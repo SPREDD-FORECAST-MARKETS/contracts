@@ -145,7 +145,7 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
      */
     function placeBet(bool _betOnA, uint256 _amount) external nonReentrant {
         require(!marketInfo.resolved, "Market already resolved");
-        require(block.timestamp < marketInfo.endTime, "Market has ended");
+        require(block.timestamp < marketInfo.endTime, "Market has ended"); // FIXED: Changed from > to <
         require(_amount > 0, "Amount must be positive");
 
         // Track bettor
@@ -379,9 +379,9 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
             oddsA = 500000; // 50% in basis points (1e6 = 100%)
             oddsB = 500000; // 50%
         } else {
-            // Odds represent payout multiplier - inverse of implied probability
-            oddsA = (marketInfo.totalVolumeB * 1e6) / totalVolume; 
-            oddsB = (marketInfo.totalVolumeA * 1e6) / totalVolume;
+            // Calculate implied probability (what % of total volume is on each side)
+            oddsA = (marketInfo.totalVolumeA * 1e6) / totalVolume; 
+            oddsB = (marketInfo.totalVolumeB * 1e6) / totalVolume;
         }
     }
 

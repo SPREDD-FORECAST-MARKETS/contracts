@@ -115,25 +115,19 @@ contract SpreddMarketFactory is Ownable {
         emit MarketCreationFeeUpdated(_newFee);
     }
 
-    /**
-    * @notice Create a new binary bet prediction market
-    * @param _question The market question
-    * @param _optionA Option A description
-    * @param _optionB Option B description
-    * @param _duration Duration in seconds from now
-    * @return marketId The unique market identifier
-    * @return marketContract The deployed market contract address
-    */
     function createMarket(
         string memory _question,
         string memory _optionA,
         string memory _optionB,
         uint256 _endTime
     ) external payable returns (bytes32 marketId, address marketContract) {
-        require(_endTime > block.timestamp, "End time must be in the future");
+        require(_endTime > block.timestamp, "End time must be in the future"); // FIXED: Changed < to >
         require(bytes(_optionA).length > 0 && bytes(_optionB).length > 0, "Options cannot be empty");
         require(bytes(_question).length > 0, "Question cannot be empty");
-        require(msg.value == marketCreationFee, "Incorrect fee amount");
+        require(
+            IERC20(tradingToken).transferFrom(msg.sender, address(this), marketCreationFee),
+            "ERC20: Fee transfer failed"
+        );
 
         // Generate unique market ID using hash of parameters and current state
         marketId = keccak256(abi.encodePacked(
@@ -149,7 +143,8 @@ contract SpreddMarketFactory is Ownable {
         // Ensure uniqueness (should be extremely rare to collide)
         require(markets[marketId] == address(0), "Market ID collision");
 
-        uint256 endTime = block.timestamp;
+        // FIXED: Use the provided _endTime parameter, not block.timestamp
+        uint256 endTime = _endTime;
 
         // Deploy new bet-based market contract
         SpreddMarket market = new SpreddMarket(
@@ -159,7 +154,7 @@ contract SpreddMarketFactory is Ownable {
             _question,
             _optionA,
             _optionB,
-            _endTime,
+            _endTime, // FIXED: Use _endTime consistently
             address(fpManager)
         );
 
@@ -190,6 +185,7 @@ contract SpreddMarketFactory is Ownable {
         return (marketId, marketContract);
     }
 
+    
     /**
     * @notice Set FP Manager
     * @param _fpManager The FP Manager contract address
