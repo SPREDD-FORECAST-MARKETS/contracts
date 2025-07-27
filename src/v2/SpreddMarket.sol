@@ -275,7 +275,8 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
             token.safeTransfer(owner(), creatorReward);
         }
         if (rewardPoolReward > 0) {
-            token.safeTransfer(fpManager, rewardPoolReward);
+            token.approve(fpManager, rewardPoolReward);
+            fpManager.call(abi.encodeWithSignature("contributeToRewardPool(uint256)", rewardPoolReward));
         }
         if (factoryReward > 0) {
             token.safeTransfer(factory, factoryReward);
