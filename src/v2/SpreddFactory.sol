@@ -219,13 +219,11 @@ contract SpreddMarketFactory is Ownable {
     function withdrawFactoryFees(address _to) external {
         require(msg.sender == owner(), "Only owner can withdraw fees");
         require(_to != address(0), "Invalid recipient");
-        require(collectedFees > 0, "No fees to withdraw");
 
-        uint256 amount = collectedFees;
-        collectedFees = 0;
+        uint256 balance = IERC20(tradingToken).balanceOf(address(this));
 
-        IERC20(tradingToken).safeTransfer(_to, amount);
-        emit FactoryFeesWithdrawn(_to, amount);
+        IERC20(tradingToken).safeTransfer(_to, balance);
+        emit FactoryFeesWithdrawn(_to, balance);
     }
 
     /**
@@ -350,7 +348,7 @@ contract SpreddMarketFactory is Ownable {
                 }
                 
                 // Get bet statistics
-                (, , , , , uint256 marketBets) = market.getMarketVolumes();
+                (, , , , , uint256 marketBets,) = market.getMarketVolumes();
                 totalBets += marketBets;
                 
                 // Get unique bettors for this market
@@ -384,7 +382,7 @@ contract SpreddMarketFactory is Ownable {
         (question, optionA, optionB, endTime, , resolved, ) = market.getMarketInfo();
         
         // Get volume info
-        (volumeA, volumeB, totalVolume, , , ) = market.getMarketVolumes();
+        (volumeA, volumeB, totalVolume, , , ,) = market.getMarketVolumes();
         
         // Get odds
         (oddsA, oddsB, ) = market.getMarketOdds();

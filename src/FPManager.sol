@@ -2,19 +2,30 @@
 pragma solidity ^0.8.13;
 
 import {Ownable} from "@thirdweb-dev/contracts/extension/Ownable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 /**
  * @title WeeklyForecastPointManager
  * @dev Manages weekly Forecast Points (FP) calculation and ranking for traders and creators
- * Resets every week - no reward distribution, just points and leaderboards
+ * Accumulates USDT from market resolutions and distributes to top 10 traders weekly
  */
-contract WeeklyForecastPointManager is Ownable {
+contract WeeklyForecastPointManager is Ownable, ReentrancyGuard {
+    using SafeERC20 for IERC20;
     
     // Weekly cycle management
     uint256 public constant WEEK_DURATION = 7 days;
     uint256 public weekStartTime;
     uint256 public currentWeek;
     uint256 public immutable topK; // Number of top performers to store each week
+    
+    // Reward token (USDT) and accumulated pool
+    IERC20 public rewardToken; // USDT token
+    uint256 public currentWeekRewardPool; // Accumulated USDT for current week
+    
+    // Reward distribution percentages for top 10 traders (in basis points, 10000 = 100%)
+    uint256[10] public rewardPercentages = [2500, 1800, 1500, 1000, 800, 700, 600, 500, 400, 200]; // 25%, 18%, 15%, 10%, 8%, 7%, 6%, 5%, 4%, 2%
     
     // Weekly FP tracking (resets every week)
     mapping(address => uint256) public weeklyTraderFP;
@@ -27,6 +38,11 @@ contract WeeklyForecastPointManager is Ownable {
     // Historical tracking for past weeks
     mapping(uint256 => mapping(address => uint256)) public historicalTraderFP; // week => user => FP
     mapping(uint256 => mapping(address => uint256)) public historicalCreatorFP; // week => user => FP
+    
+    // Weekly reward tracking
+    mapping(uint256 => uint256) public weeklyRewardPoolDistributed; // week => total USDT distributed
+    mapping(uint256 => mapping(address => uint256)) public weeklyTraderRewards; // week => trader => reward amount
+    mapping(address => uint256) public totalRewardsEarned; // trader => total rewards earned
     
     // Top K winners storage with their FP points
     struct TopPerformer {
@@ -74,13 +90,28 @@ contract WeeklyForecastPointManager is Ownable {
         address[] topCreators,
         uint256[] creatorFP
     );
+    event RewardPoolContribution(
+        address indexed market,
+        uint256 amount,
+        uint256 newPoolTotal
+    );
+    event TraderRewardsDistributed(
+        uint256 indexed week,
+        address[] indexed traders,
+        uint256[] rewardAmounts,
+        uint256 totalDistributed
+    );
+    event RewardPercentagesUpdated(uint256[10] newPercentages);
 
-    constructor(uint256 _topK) {
+    constructor(uint256 _topK, address _rewardToken) {
         require(_topK > 0 && _topK <= 50, "TopK must be between 1 and 50");
+        require(_rewardToken != address(0), "Invalid reward token");
         _setupOwner(msg.sender);
         topK = _topK;
+        rewardToken = IERC20(_rewardToken);
         weekStartTime = block.timestamp;
         currentWeek = 1;
+        currentWeekRewardPool = 0;
     }
 
     function _canSetOwner() internal view virtual override returns (bool) {
@@ -100,14 +131,46 @@ contract WeeklyForecastPointManager is Ownable {
     }
 
     /**
+     * @notice Receive USDT rewards from market contracts when they resolve
+     * Called by market contracts to contribute to the reward pool
+     */
+    function contributeToRewardPool(uint256 _amount) external onlyAuthorized {
+        require(_amount > 0, "Amount must be positive");
+        
+        // Transfer USDT from market to this contract
+        rewardToken.safeTransferFrom(msg.sender, address(this), _amount);
+        
+        // Add to current week's reward pool
+        currentWeekRewardPool += _amount;
+        
+        emit RewardPoolContribution(msg.sender, _amount, currentWeekRewardPool);
+    }
+
+    /**
+     * @notice Update reward distribution percentages (only owner)
+     */
+    function setRewardPercentages(uint256[10] memory _percentages) external {
+        require(msg.sender == owner(), "Only owner can set percentages");
+        
+        // Verify percentages sum to 100% (10000 basis points)
+        uint256 totalPercentage = 0;
+        for (uint256 i = 0; i < 10; i++) {
+            totalPercentage += _percentages[i];
+        }
+        require(totalPercentage == 10000, "Percentages must sum to 100%");
+        
+        rewardPercentages = _percentages;
+        emit RewardPercentagesUpdated(_percentages);
+    }
+
+    /**
      * @notice Authorize/deauthorize contracts to interact with FP manager
      */
     function setAuthorizedContract(address _contract, bool _authorized) external {
-        require(msg.sender == spreddFactory, "Only owner can authorize contracts");
+        require(msg.sender == spreddFactory, "Only factory can authorize contracts");
         authorizedContracts[_contract] = _authorized;
         emit ContractAuthorized(_contract, _authorized);
     }
-
 
     /**
      * @notice Set Spredd Factory to authorize contracts
@@ -184,11 +247,14 @@ contract WeeklyForecastPointManager is Ownable {
     }
 
     /**
-     * @notice Process weekly reset
+     * @notice Process weekly reset and distribute accumulated rewards to top traders
      */
     function _processWeeklyReset() internal {
         // Store historical data and get top performers before reset
         _finalizeWeeklyLeaderboard();
+
+        // Distribute accumulated USDT rewards to top 10 traders
+        _distributeTraderRewards();
 
         // Store historical FP for all participants
         for (uint256 i = 0; i < currentTraders.length; i++) {
@@ -207,8 +273,60 @@ contract WeeklyForecastPointManager is Ownable {
         // Start new week
         currentWeek++;
         weekStartTime = block.timestamp;
+        // Reset reward pool for new week
+        currentWeekRewardPool = 0;
 
         emit WeeklyReset(currentWeek, block.timestamp);
+    }
+
+    /**
+     * @notice Distribute accumulated USDT rewards directly to top 10 traders
+     */
+    function _distributeTraderRewards() internal {
+        TopPerformer[] memory topTraders = weeklyTopTraders[currentWeek];
+        
+        if (topTraders.length == 0 || currentWeekRewardPool == 0) {
+            return; // No traders or rewards to distribute
+        }
+
+        address[] memory rewardedTraders = new address[](topTraders.length);
+        uint256[] memory rewardAmounts = new uint256[](topTraders.length);
+        uint256 totalDistributed = 0;
+
+        // Distribute rewards according to ranking (up to top 10)
+        uint256 rewardCount = topTraders.length > 10 ? 10 : topTraders.length;
+        
+        for (uint256 i = 0; i < rewardCount; i++) {
+            address trader = topTraders[i].user;
+            uint256 rewardAmount = (currentWeekRewardPool * rewardPercentages[i]) / 10000;
+            
+            if (rewardAmount > 0) {
+                // Transfer USDT directly to trader
+                rewardToken.safeTransfer(trader, rewardAmount);
+                
+                // Track rewards for historical purposes
+                weeklyTraderRewards[currentWeek][trader] = rewardAmount;
+                totalRewardsEarned[trader] += rewardAmount;
+                
+                rewardedTraders[i] = trader;
+                rewardAmounts[i] = rewardAmount;
+                totalDistributed += rewardAmount;
+            }
+        }
+
+        // Store total distributed for this week
+        weeklyRewardPoolDistributed[currentWeek] = totalDistributed;
+
+        // Emit event with actual distributed amounts
+        address[] memory actualTraders = new address[](rewardCount);
+        uint256[] memory actualAmounts = new uint256[](rewardCount);
+        
+        for (uint256 i = 0; i < rewardCount; i++) {
+            actualTraders[i] = rewardedTraders[i];
+            actualAmounts[i] = rewardAmounts[i];
+        }
+
+        emit TraderRewardsDistributed(currentWeek, actualTraders, actualAmounts, totalDistributed);
     }
 
     /**
@@ -363,47 +481,135 @@ contract WeeklyForecastPointManager is Ownable {
     }
 
     /**
-     * @notice Get weekly winners for a specific week
+     * @notice Get weekly winners for a specific week with their rewards
      * @param _week The week number to query
      * @return topTraders Array of top trader addresses
      * @return traderFP Array of FP points for top traders
+     * @return traderRewards Array of USDT reward amounts for top traders
      * @return topCreators Array of top creator addresses  
      * @return creatorFP Array of FP points for top creators
+     * @return totalDistributed Total USDT distributed that week
      */
     function getWeeklyWinners(uint256 _week) external view returns (
         address[] memory topTraders,
         uint256[] memory traderFP,
+        uint256[] memory traderRewards,
         address[] memory topCreators,
-        uint256[] memory creatorFP
+        uint256[] memory creatorFP,
+        uint256 totalDistributed
     ) {
         require(_week > 0 && _week < currentWeek, "Invalid week number");
         
         TopPerformer[] memory traders = weeklyTopTraders[_week];
         TopPerformer[] memory creators = weeklyTopCreators[_week];
         
-        // Extract trader data
+        // Extract trader data with rewards
         topTraders = new address[](traders.length);
         traderFP = new uint256[](traders.length);
+        traderRewards = new uint256[](traders.length);
         for (uint256 i = 0; i < traders.length; i++) {
             topTraders[i] = traders[i].user;
             traderFP[i] = traders[i].fpPoints;
+            traderRewards[i] = weeklyTraderRewards[_week][traders[i].user];
         }
         
-        // Extract creator data
+        // Extract creator data (no rewards)
         topCreators = new address[](creators.length);
         creatorFP = new uint256[](creators.length);
         for (uint256 i = 0; i < creators.length; i++) {
             topCreators[i] = creators[i].user;
             creatorFP[i] = creators[i].fpPoints;
         }
+        
+        totalDistributed = weeklyRewardPoolDistributed[_week];
     }
 
     /**
+     * @notice Get trader's reward information
+     */
+    function getTraderRewardInfo(address _trader) external view returns (
+        uint256 totalEarned,
+        uint256 currentWeekFP,
+        uint256 currentWeekRank,
+        uint256 potentialReward
+    ) {
+        totalEarned = totalRewardsEarned[_trader];
+        currentWeekFP = weeklyTraderFP[_trader];
+        
+        // Calculate current week rank
+        currentWeekRank = 0;
+        uint256 traderFP = weeklyTraderFP[_trader];
+        if (traderFP > 0) {
+            for (uint256 i = 0; i < currentTraders.length; i++) {
+                if (weeklyTraderFP[currentTraders[i]] > traderFP) {
+                    currentWeekRank++;
+                }
+            }
+            currentWeekRank++; // Convert to 1-based ranking
+        }
+        
+        // Calculate potential reward if current rank holds
+        if (currentWeekRank > 0 && currentWeekRank <= 10) {
+            potentialReward = (currentWeekRewardPool * rewardPercentages[currentWeekRank - 1]) / 10000;
+        }
+    }
+
+    /**
+     * @notice Get current reward pool status
+     */
+    function getCurrentRewardPoolStatus() external view returns (
+        uint256 currentPool,
+        uint256 contractBalance,
+        address rewardTokenAddress,
+        uint256 weeklyDistributed
+    ) {
+        currentPool = currentWeekRewardPool;
+        contractBalance = rewardToken.balanceOf(address(this));
+        rewardTokenAddress = address(rewardToken);
+        if (currentWeek > 1) {
+            weeklyDistributed = weeklyRewardPoolDistributed[currentWeek - 1];
+        }
+    }
+
+    /**
+     * @notice Preview potential rewards for current week ranking
+     */
+    function previewCurrentWeekRewards() external view returns (
+        address[] memory topTraders,
+        uint256[] memory traderFP,
+        uint256[] memory potentialRewards
+    ) {
+        (topTraders, traderFP) = _getTopTradersWithFP(10); // Get top 10
+        
+        potentialRewards = new uint256[](topTraders.length);
+        for (uint256 i = 0; i < topTraders.length && i < 10; i++) {
+            if (topTraders[i] != address(0)) {
+                potentialRewards[i] = (currentWeekRewardPool * rewardPercentages[i]) / 10000;
+            }
+        }
+    }
+
+    /**
+     * @notice Get reward distribution percentages
+     */
+    function getRewardPercentages() external view returns (uint256[10] memory) {
+        return rewardPercentages;
+    }
+
+    /**
+     * @notice Emergency withdraw (only owner)
+     */
+    function emergencyWithdraw(uint256 _amount) external {
+        require(msg.sender == owner(), "Only owner can emergency withdraw");
+        require(_amount <= rewardToken.balanceOf(address(this)), "Insufficient balance");
+        
+        rewardToken.safeTransfer(owner(), _amount);
+    }
+
+    // ... [Keep all the existing FP calculation and view functions unchanged]
+    
+    /**
      * @notice Get any user's FP points for current running week
-     * @param _user The user address to query
-     * @return traderFP User's trader FP points for current week
-     * @return creatorFP User's creator FP points for current week
-     * @return totalWeeklyFP User's total FP points for current week
      */
     function getCurrentWeekUserFP(address _user) external view returns (
         uint256 traderFP,
@@ -417,11 +623,6 @@ contract WeeklyForecastPointManager is Ownable {
 
     /**
      * @notice Get user's FP points for a specific past week
-     * @param _user The user address to query
-     * @param _week The week number to query
-     * @return traderFP User's trader FP points for that week
-     * @return creatorFP User's creator FP points for that week
-     * @return totalWeeklyFP User's total FP points for that week
      */
     function getUserWeeklyFP(address _user, uint256 _week) external view returns (
         uint256 traderFP,
@@ -437,7 +638,6 @@ contract WeeklyForecastPointManager is Ownable {
 
     /**
      * @notice Get current week top performers (live leaderboard)
-     * @param _count Number of top performers to return
      */
     function getCurrentWeekTopPerformers(uint256 _count) external view returns (
         address[] memory topTraders,
@@ -544,7 +744,8 @@ contract WeeklyForecastPointManager is Ownable {
         uint256 endTime,
         uint256 tradersCount,
         uint256 creatorsCount,
-        uint256 topKSetting
+        uint256 topKSetting,
+        uint256 currentRewardPool
     ) {
         return (
             currentWeek,
@@ -552,7 +753,8 @@ contract WeeklyForecastPointManager is Ownable {
             weekStartTime + WEEK_DURATION,
             currentTraders.length,
             currentCreators.length,
-            topK
+            topK,
+            currentWeekRewardPool
         );
     }
 
@@ -562,11 +764,13 @@ contract WeeklyForecastPointManager is Ownable {
     function getUserAllTimeFP(address _user) external view returns (
         uint256 totalTraderFP_,
         uint256 totalCreatorFP_,
-        uint256 grandTotalFP
+        uint256 grandTotalFP,
+        uint256 totalRewardsEarned_
     ) {
         totalTraderFP_ = totalTraderFP[_user];
         totalCreatorFP_ = totalCreatorFP[_user];
         grandTotalFP = totalTraderFP_ + totalCreatorFP_;
+        totalRewardsEarned_ = totalRewardsEarned[_user];
     }
 
     /**

@@ -10,7 +10,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
  * @title SpreddMarket
  * @dev Individual binary prediction market contract - bet-based (no AMM)
  * Users can only place bets and add more to existing bets
- * 10% to creator, 5% to factory, 85% to winning pool
+ * Fee structure: 2% to creator, 10% to reward pool, 1% to factory, 87% to winning pool
  */
 contract SpreddMarket is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -34,6 +34,7 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
         uint256 creatorFee;   // Accumulated creator fees
         uint256 factoryFee;   // Accumulated factory fees
         bool resolved;
+        bool feesDistributed; // Whether fees have been distributed
     }
 
     /// @notice User bet tracking
@@ -62,11 +63,12 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
     uint256 public totalBetCount;
     
     // Fee configuration
-    uint256 public constant creatorFeePercent = 10; // 10%
-    uint256 public constant factoryFeePercent = 5;  // 5%
+    uint256 public constant creatorFeePercent = 2; // 2%
+    uint256 public constant rewardPoolPercent = 10; // 10%
+    uint256 public constant factoryFeePercent = 1;  // 1%
+    uint256 public constant totalFeePercent = 13; // 13% total fees
 
     address public immutable fpManager; // FP Manager contract
-
 
     /// @notice Events
     event BetPlaced(
@@ -81,9 +83,17 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
 
     event MarketResolved(MarketOutcome outcome);
 
+    event FeesDistributed(
+        uint256 creatorFee,
+        uint256 rewardPoolFee,
+        uint256 factoryFee
+    );
+
     event WinningsClaimed(
         address indexed user,
-        uint256 amount
+        uint256 originalBet,
+        uint256 winnings,
+        uint256 totalPayout
     );
 
     modifier onlyFactory() {
@@ -101,7 +111,6 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
         uint256 _endTime,
         address _fpManager
     ) {
-
         require(_fpManager != address(0), "Invalid FP Manager address");
         
         marketId = _marketId;
@@ -121,7 +130,8 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
             totalVolumeB: 0,
             creatorFee: 0,
             factoryFee: 0,
-            resolved: false
+            resolved: false,
+            feesDistributed: false
         });
     }
 
@@ -145,7 +155,7 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
      */
     function placeBet(bool _betOnA, uint256 _amount) external nonReentrant {
         require(!marketInfo.resolved, "Market already resolved");
-        require(block.timestamp < marketInfo.endTime, "Market has ended"); // FIXED: Changed from > to <
+        require(block.timestamp < marketInfo.endTime, "Market has ended");
         require(_amount > 0, "Amount must be positive");
 
         // Track bettor
@@ -154,16 +164,8 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
         // Transfer tokens from user to contract
         token.safeTransferFrom(msg.sender, address(this), _amount);
 
-        // Calculate fees: 10% creator + 5% factory = 15% total fees
-        uint256 totalFees = (_amount * 15) / 100;
-        uint256 betAmount = _amount - totalFees;
-        
-        uint256 creatorFee = (_amount * creatorFeePercent) / 100;
-        uint256 factoryFee = (_amount * factoryFeePercent) / 100;
-
-        // Update market fees
-        marketInfo.creatorFee += creatorFee;
-        marketInfo.factoryFee += factoryFee;
+        // Store the full bet amount (no fees deducted during betting)
+        uint256 betAmount = _amount;
 
         // Update user bet and market totals
         UserBet storage userBet = userBets[msg.sender];
@@ -179,7 +181,6 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
         // Update statistics
         totalBetCount++;
 
-
         _awardCreatorFP();
 
         emit BetPlaced(
@@ -192,7 +193,6 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
             marketInfo.totalVolumeB
         );
     }
-
 
     /**
      * @notice Award creator FP for trading activity
@@ -217,46 +217,42 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
     /**
      * @notice Award FP to winning traders
      */
-    function _awardTraderFP(MarketOutcome _outcome) internal {
-        // Determine correct side liquidity for FP calculation
-        uint256 correctSideLiquidity = _outcome == MarketOutcome.OPTION_A ? marketInfo.totalVolumeA : marketInfo.totalVolumeB;
+    function _awardTraderFP(address user, MarketOutcome _outcome) internal {
+        UserBet memory position = userBets[user];
         
-        uint256 totalLiquidity = marketInfo.totalVolumeA + marketInfo.totalVolumeB;
-        uint256 marketDuration = marketInfo.endTime - marketCreationTime;
-        uint256 marketVolume = marketInfo.totalVolumeA + marketInfo.totalVolumeB;
+        // Get user's winning token amount
+        uint256 winningTokens = _outcome == MarketOutcome.OPTION_A ? position.amountA : position.amountB;
         
-        // Iterate through all users with positions
-        for (uint256 i = 0; i < bettors.length; i++) {
-            address user = bettors[i];
-            UserBet memory position = userBets[user];
+        // Award FP only if user has winning tokens
+        if (winningTokens > 0) {
+            // Determine correct side liquidity for FP calculation
+            uint256 correctSideLiquidity = _outcome == MarketOutcome.OPTION_A ? marketInfo.totalVolumeA : marketInfo.totalVolumeB;
             
-            // Get user's winning token amount
-            uint256 winningTokens = _outcome == MarketOutcome.OPTION_A ? position.amountA : position.amountB;
-                
-            // Award FP only if user has winning tokens
-            if (winningTokens > 0) {
-                // Call FP Manager to award trader points
-                (bool _success, ) = fpManager.call(
-                    abi.encodeWithSignature(
-                        "awardTraderFP(address,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256)",
-                        user,                           // trader address
-                        marketId,                       // market ID
-                        marketVolume,                   // total market volume
-                        position.firstPositionTime,     // when user first bought tokens
-                        marketCreationTime,             // when market was created
-                        marketDuration,                 // market duration
-                        correctSideLiquidity,          // correct side liquidity
-                        totalLiquidity,                // total liquidity
-                        winningTokens                  // user's winning position size
-                    )
-                );
-                // Don't revert if FP award fails to avoid breaking core functionality
-            }
+            uint256 totalLiquidity = marketInfo.totalVolumeA + marketInfo.totalVolumeB;
+            uint256 marketDuration = marketInfo.endTime - marketCreationTime;
+            uint256 marketVolume = marketInfo.totalVolumeA + marketInfo.totalVolumeB;
+            
+            // Call FP Manager to award trader points
+            (bool _success, ) = fpManager.call(
+                abi.encodeWithSignature(
+                    "awardTraderFP(address,bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256)",
+                    user,                           // trader address
+                    marketId,                       // market ID
+                    marketVolume,                   // total market volume
+                    position.firstPositionTime,     // when user first bought tokens
+                    marketCreationTime,             // when market was created
+                    marketDuration,                 // market duration
+                    correctSideLiquidity,          // correct side liquidity
+                    totalLiquidity,                // total liquidity
+                    winningTokens                  // user's winning position size
+                )
+            );
+            // Don't revert if FP award fails to avoid breaking core functionality
         }
     }
 
     /**
-     * @notice Resolve market with winning option
+     * @notice Resolve market with winning option and distribute fees
      */
     function resolveMarket(MarketOutcome _outcome) external {
         require(msg.sender == owner(), "Only owner can resolve market");
@@ -264,29 +260,89 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
         require(!marketInfo.resolved, "Market already resolved");
         require(_outcome != MarketOutcome.UNRESOLVED, "Invalid outcome");
 
-        // Check if there are bets on both sides
-        if (marketInfo.totalVolumeA == 0 || marketInfo.totalVolumeB == 0) {
-            // If only one side has bets, set outcome but handle as special case in claiming
-            marketInfo.outcome = _outcome;
-            marketInfo.resolved = true;
-            emit MarketResolved(_outcome);
-            return;
-        }
-
         marketInfo.outcome = _outcome;
         marketInfo.resolved = true;
+        marketInfo.feesDistributed = true;
 
-        // Pay fees to creator and factory
-        if (marketInfo.creatorFee > 0) {
-            token.safeTransfer(owner(), marketInfo.creatorFee);
-        }
-        if (marketInfo.factoryFee > 0) {
-            token.safeTransfer(factory, marketInfo.factoryFee);
-        }
+        // Distribute fees immediately
+        uint256 totalPool = marketInfo.totalVolumeA + marketInfo.totalVolumeB;
+        uint256 creatorReward = (totalPool * creatorFeePercent) / 100;
+        uint256 rewardPoolReward = (totalPool * rewardPoolPercent) / 100;
+        uint256 factoryReward = (totalPool * factoryFeePercent) / 100;
 
-        _awardTraderFP(_outcome);
+        // Distribute fees
+        if (creatorReward > 0) {
+            token.safeTransfer(owner(), creatorReward);
+        }
+        if (rewardPoolReward > 0) {
+            token.safeTransfer(fpManager, rewardPoolReward);
+        }
+        if (factoryReward > 0) {
+            token.safeTransfer(factory, factoryReward);
+        }
 
         emit MarketResolved(_outcome);
+        emit FeesDistributed(creatorReward, rewardPoolReward, factoryReward);
+    }
+
+    /**
+     * @notice Calculate user's winnings and total payout
+     */
+    function getUserWinnings(address _user) 
+        external 
+        view 
+        returns (
+            uint256 originalBet,
+            uint256 winnings, 
+            uint256 totalPayout,
+            bool canClaim
+        ) 
+    {
+        if (!marketInfo.resolved) {
+            return (0, 0, 0, false);
+        }
+
+        UserBet memory userBet = userBets[_user];
+        
+        if (userBet.claimed || (userBet.amountA == 0 && userBet.amountB == 0)) {
+            return (0, 0, 0, false);
+        }
+
+        // Handle special case: only one side has bets (refund scenario)
+        if (marketInfo.totalVolumeA == 0 || marketInfo.totalVolumeB == 0) {
+            originalBet = userBet.amountA + userBet.amountB;
+            return (originalBet, 0, originalBet, true);
+        }
+
+        // Normal case: calculate winnings based on outcome
+        uint256 userWinningBet;
+        uint256 totalWinningVolume;
+        uint256 totalPool = marketInfo.totalVolumeA + marketInfo.totalVolumeB;
+
+        if (marketInfo.outcome == MarketOutcome.OPTION_A) {
+            userWinningBet = userBet.amountA;
+            totalWinningVolume = marketInfo.totalVolumeA;
+            originalBet = userBet.amountA;
+        } else if (marketInfo.outcome == MarketOutcome.OPTION_B) {
+            userWinningBet = userBet.amountB;
+            totalWinningVolume = marketInfo.totalVolumeB;
+            originalBet = userBet.amountB;
+        }
+
+        if (userWinningBet > 0 && totalWinningVolume > 0) {
+            // Winner gets their original bet PLUS proportional share of losing side after fees
+            // Total pool available = total volume (fees deducted during resolution)
+            uint256 totalPoolAfterFees = totalPool - (totalPool * totalFeePercent) / 100;
+            
+            // Calculate user's proportional share of the total pool after fees
+            uint256 userProportion = (userWinningBet * 1e18) / totalWinningVolume;
+            totalPayout = (totalPoolAfterFees * userProportion) / 1e18;
+            winnings = totalPayout > originalBet ? totalPayout - originalBet : 0;
+            
+            return (originalBet, winnings, totalPayout, true);
+        }
+
+        return (0, 0, 0, false);
     }
 
     /**
@@ -299,39 +355,23 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
         UserBet storage userBet = userBets[msg.sender];
         require(userBet.amountA > 0 || userBet.amountB > 0, "No bets found");
 
+        // Get user's winnings
+        (uint256 originalBet, uint256 winnings, uint256 totalPayout, bool canClaim) = this.getUserWinnings(msg.sender);
+        require(canClaim, "No winnings to claim");
+
         userBet.claimed = true;
 
-        uint256 payout = 0;
-
-        // Handle special case: only one side has bets (refund scenario)
-        if (marketInfo.totalVolumeA == 0 || marketInfo.totalVolumeB == 0) {
-            // Refund the user's bets
-            payout = userBet.amountA + userBet.amountB;
-        } else {
-            // Normal case: calculate winnings based on outcome
-            uint256 userWinningBet;
-            uint256 totalWinningPool;
-            uint256 totalPool = marketInfo.totalVolumeA + marketInfo.totalVolumeB;
-
-            if (marketInfo.outcome == MarketOutcome.OPTION_A) {
-                userWinningBet = userBet.amountA;
-                totalWinningPool = marketInfo.totalVolumeA;
-            } else if (marketInfo.outcome == MarketOutcome.OPTION_B) {
-                userWinningBet = userBet.amountB;
-                totalWinningPool = marketInfo.totalVolumeB;
-            }
-
-            if (userWinningBet > 0 && totalWinningPool > 0) {
-                // Winner gets proportional share of the total pool
-                payout = (userWinningBet * totalPool) / totalWinningPool;
-            }
+        // Award FP for winning trades (only for normal winning scenarios)
+        if (winnings > 0) {
+            _awardTraderFP(msg.sender, marketInfo.outcome);
         }
 
-        if (payout > 0) {
-            token.safeTransfer(msg.sender, payout);
+        // Transfer total payout to user
+        if (totalPayout > 0) {
+            token.safeTransfer(msg.sender, totalPayout);
         }
 
-        emit WinningsClaimed(msg.sender, payout);
+        emit WinningsClaimed(msg.sender, originalBet, winnings, totalPayout);
     }
 
     /**
@@ -342,26 +382,21 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
         view 
         returns (uint256 potentialWinnings, uint256 netBetAmount) 
     {
-        // Calculate net bet amount after fees
-        uint256 totalFees = (_betAmount * 15) / 100;
-        netBetAmount = _betAmount - totalFees;
+        // Net bet amount is the full amount (no fees deducted during betting)
+        netBetAmount = _betAmount;
         
-        uint256 newTotalPool;
-        uint256 newWinningPool;
+        uint256 currentWinningVolume = _betOnA ? marketInfo.totalVolumeA : marketInfo.totalVolumeB;
+        uint256 newWinningVolume = currentWinningVolume + netBetAmount;
+        uint256 totalCurrentVolume = marketInfo.totalVolumeA + marketInfo.totalVolumeB;
+        uint256 newTotalVolume = totalCurrentVolume + netBetAmount;
         
-        if (_betOnA) {
-            newTotalPool = marketInfo.totalVolumeA + marketInfo.totalVolumeB + netBetAmount;
-            newWinningPool = marketInfo.totalVolumeA + netBetAmount;
-        } else {
-            newTotalPool = marketInfo.totalVolumeA + marketInfo.totalVolumeB + netBetAmount;
-            newWinningPool = marketInfo.totalVolumeB + netBetAmount;
-        }
-        
-        if (newWinningPool == 0) {
+        if (newWinningVolume == 0) {
             potentialWinnings = 0;
         } else {
-            // Calculate what user would win if they bet this amount
-            potentialWinnings = (netBetAmount * newTotalPool) / newWinningPool;
+            // Calculate total pool after fees (fees only deducted once at resolution)
+            uint256 totalPoolAfterFees = newTotalVolume - (newTotalVolume * totalFeePercent) / 100;
+            uint256 userProportion = (netBetAmount * 1e18) / newWinningVolume;
+            potentialWinnings = (totalPoolAfterFees * userProportion) / 1e18;
         }
     }
 
@@ -382,6 +417,33 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
             // Calculate implied probability (what % of total volume is on each side)
             oddsA = (marketInfo.totalVolumeA * 1e6) / totalVolume; 
             oddsB = (marketInfo.totalVolumeB * 1e6) / totalVolume;
+        }
+    }
+
+    /**
+     * @notice Calculate user's expected winnings if they win for each option
+     */
+    function getUserExpectedWinnings(address _user) 
+        external 
+        view 
+        returns (uint256 expectedWinningsA, uint256 expectedWinningsB) 
+    {
+        if (!marketInfo.resolved) {
+            UserBet memory userBet = userBets[_user];
+            uint256 totalVolume = marketInfo.totalVolumeA + marketInfo.totalVolumeB;
+            uint256 totalPoolAfterFees = totalVolume - (totalVolume * totalFeePercent) / 100;
+            
+            // Calculate expected winnings for Option A
+            if (userBet.amountA > 0 && marketInfo.totalVolumeA > 0) {
+                uint256 proportionA = (userBet.amountA * 1e18) / marketInfo.totalVolumeA;
+                expectedWinningsA = (totalPoolAfterFees * proportionA) / 1e18;
+            }
+            
+            // Calculate expected winnings for Option B
+            if (userBet.amountB > 0 && marketInfo.totalVolumeB > 0) {
+                uint256 proportionB = (userBet.amountB * 1e18) / marketInfo.totalVolumeB;
+                expectedWinningsB = (totalPoolAfterFees * proportionB) / 1e18;
+            }
         }
     }
 
@@ -409,7 +471,8 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
             uint256 totalVolume, 
             uint256 creatorFees, 
             uint256 factoryFees,
-            uint256 totalBets
+            uint256 totalBets,
+            bool feesDistributed
         ) 
     {
         return (
@@ -418,7 +481,8 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
             marketInfo.totalVolumeA + marketInfo.totalVolumeB,
             marketInfo.creatorFee,
             marketInfo.factoryFee,
-            totalBetCount
+            totalBetCount,
+            marketInfo.feesDistributed
         );
     }
 
@@ -475,6 +539,16 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
      */
     function getBettorCount() external view returns (uint256) {
         return bettors.length;
+    }
+
+    /**
+     * @notice Get winning pool size after fees
+     */
+    function getWinningPoolSize() external view returns (uint256) {
+        if (!marketInfo.resolved) return 0;
+        
+        uint256 totalPool = marketInfo.totalVolumeA + marketInfo.totalVolumeB;
+        return totalPool - (totalPool * totalFeePercent) / 100;
     }
 
     /**
