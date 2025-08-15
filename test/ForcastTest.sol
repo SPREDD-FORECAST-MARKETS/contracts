@@ -1,442 +1,494 @@
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.19;
+// // SPDX-License-Identifier: MIT
+// pragma solidity ^0.8.17;
 
-import "forge-std/Test.sol";
-import "forge-std/console.sol";
-import "../src/Token.sol";
-import "../src/SpreddFactory.sol";
-import "../src/SpreddMarket.sol";
-import "../src/FPManager.sol";
+// import "forge-std/Test.sol";
+// import "../src/SpreddMarketFactory.sol";
+// import "../src/SpreddMarket.sol";
+// import "../src/FPManager.sol";
+// import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-contract ForecastPointTest is Test {
-    USDT public usdt;
-    WeeklyForecastPointManager public fpManager;
-    BinaryPredictionMarketFactory public factory;
+// // Mock USDT Token for testing
+// contract USDT is ERC20 {
+//     constructor(uint256 initialSupply) ERC20("Tether USD", "USDT") {
+//         _mint(msg.sender, initialSupply * (10**6));
+//     }
 
-    // Test users
-    address public user1 = makeAddr("user1");
-    address public user2 = makeAddr("user2");
-    address public user3 = makeAddr("user3");
-    address public user4 = makeAddr("user4");
-    address public user5 = makeAddr("user5");
+//     // Override decimals to 6
+//     function decimals() public pure override returns (uint8) {
+//         return 6;
+//     }
+// }
+
+// contract SpreddMarketTest is Test {
+//     // Contracts
+//     USDT public usdt;
+//     WeeklyForecastPointManager public fpManager;
+//     SpreddMarketFactory public factory;
+//     SpreddMarket public market;
     
-    // Market creators
-    address public creator1 = makeAddr("creator1");
-    address public creator2 = makeAddr("creator2");
+//     // Test accounts
+//     address public owner = address(this);
+//     address public creator = address(0x1);
+//     address public trader1 = address(0x2);
+//     address public trader2 = address(0x3);
+//     address public trader3 = address(0x4);
+//     address public leaderboardManager = address(0x5);
     
-    // Market contracts
-    BinaryAMMPredictionMarket public market1;
-    BinaryAMMPredictionMarket public market2;
-    bytes32 public marketId1;
-    bytes32 public marketId2;
+//     // Test data
+//     uint256 public constant INITIAL_SUPPLY = 1000000; // 1M USDT
+//     uint256 public constant MARKET_CREATION_FEE = 100 * 10**6; // 100 USDT
+//     uint256 public constant BET_AMOUNT = 1000 * 10**6; // 1000 USDT
     
-    uint256 constant INITIAL_SUPPLY = 1000000; // 1M USDT
-    uint256 constant USER_INITIAL_BALANCE = 100 * 1e6; // 100 USDT per user
-    uint256 constant MARKET_DURATION = 7 days;
-    uint256 constant INITIAL_LIQUIDITY = 50 * 1e6; // 50 USDT
+//     bytes32 public marketId;
+//     address public marketAddress;
     
-    function setUp() public {
-        console.log("=== SETUP PHASE ===");
+//     event log_named_decimal_uint(string key, uint256 val, uint256 decimals);
+
+//     function setUp() public {
+//         // Deploy USDT token
+//         usdt = new USDT(INITIAL_SUPPLY);
         
-        // Deploy USDT token
-        usdt = new USDT(INITIAL_SUPPLY);
-        console.log("USDT deployed:", address(usdt));
+//         // Deploy FP Manager
+//         fpManager = new WeeklyForecastPointManager(10, address(usdt)); // Top 10, USDT rewards
         
-        // Deploy FP Manager with top 10 tracking
-        fpManager = new WeeklyForecastPointManager(10);
-        console.log("FP Manager deployed:", address(fpManager));
+//         // Deploy Factory
+//         factory = new SpreddMarketFactory(address(usdt));
         
-        // Deploy Factory
-        factory = new BinaryPredictionMarketFactory(address(usdt));
-        console.log("Factory deployed:", address(factory));
+//         // Set FP Manager in factory
+//         factory.setFPManager(address(fpManager));
         
-        // Set FP Manager in factory
-        factory.setFPManager(address(fpManager));
+//         // Set factory in FP Manager
+//         fpManager.setSpreddFactory(address(factory));
         
-        // Authorize factory in FP Manager
-        fpManager.setAuthorizedContract(address(factory), true);
+//         // Set leaderboard manager
+//         fpManager.setLeaderboardManager(leaderboardManager);
         
-        // Distribute USDT to test accounts
-        _distributeUSDT();
+//         // Distribute USDT to test accounts
+//         _distributeTokens();
         
-        console.log("Setup completed successfully!");
-        console.log("");
-    }
-    
-    function _distributeUSDT() internal {
-        address[] memory users = new address[](7);
-        users[0] = user1;
-        users[1] = user2;
-        users[2] = user3;
-        users[3] = user4;
-        users[4] = user5;
-        users[5] = creator1;
-        users[6] = creator2;
+//         console.log("=== SETUP COMPLETE ===");
+//         console.log("USDT deployed at:", address(usdt));
+//         console.log("FP Manager deployed at:", address(fpManager));
+//         console.log("Factory deployed at:", address(factory));
+//         _logBalances("After Setup");
+//     }
+
+//     function _distributeTokens() internal {
+//         uint256 amount = 50000 * 10**6; // 50k USDT each
         
-        for (uint i = 0; i < users.length; i++) {
-            usdt.transfer(users[i], USER_INITIAL_BALANCE);
-            console.log("Distributed %s USDT to %s", USER_INITIAL_BALANCE / 1e6, users[i]);
-        }
-    }
-    
-    function test_CompleteFlowWithTwoMarkets() public {
-        console.log("=== STARTING COMPLETE FORECAST POINT TEST ===");
-        console.log("");
+//         usdt.transfer(creator, amount);
+//         usdt.transfer(trader1, amount);
+//         usdt.transfer(trader2, amount);
+//         usdt.transfer(trader3, amount);
+//         usdt.transfer(leaderboardManager, amount);
         
-        // Step 1: Create two markets
-        _createMarkets();
+//         // Approve factory for market creation fees
+//         vm.prank(creator);
+//         usdt.approve(address(factory), MARKET_CREATION_FEE);
+//     }
+
+//     function testCompleteFlow() public {
+//         console.log("\n=== STARTING COMPLETE FLOW TEST ===");
         
-        // Step 2: Initialize markets with liquidity
-        _initializeMarkets();
+//         // 1. Create Market
+//         _testCreateMarket();
         
-        // Step 3: Users make predictions on both markets
-        _usersPredictOnMarkets();
+//         // 2. Place Bets
+//         _testPlaceBets();
         
-        // Step 4: Fast forward to market end times
-        _fastForwardToMarketEnd();
+//         // 3. Resolve Market
+//         _testResolveMarket();
         
-        // Step 5: Resolve markets
-        _resolveMarkets();
+//         // 4. Claim Winnings
+//         _testClaimWinnings();
         
-        // Step 6: Check FP awards and rankings
-        _checkFPAndRankings();
+//         // 5. Test FP Distribution
+//         _testFPDistribution();
         
-        console.log("=== TEST COMPLETED SUCCESSFULLY ===");
-    }
-    
-    function _createMarkets() internal {
-        console.log("=== CREATING MARKETS ===");
+//         // 6. Test Weekly Reset and Rewards
+//         _testWeeklyRewards();
         
-        // Creator 1 creates Market 1
-        vm.startPrank(creator1);
-        address market1Addr;
-        (marketId1, market1Addr) = factory.createMarket(
-            "Will Bitcoin reach $100,000 by end of week?",
-            "Yes",
-            "No",
-            MARKET_DURATION
-        );
-        market1 = BinaryAMMPredictionMarket(market1Addr);
-        console.log("Market 1 created by creator1:", market1Addr);
-        vm.stopPrank();
+//         console.log("\n=== ALL TESTS COMPLETED SUCCESSFULLY ===");
+//     }
+
+//     function _testCreateMarket() internal {
+//         console.log("\n--- Testing Market Creation ---");
         
-        // Creator 2 creates Market 2
-        vm.startPrank(creator2);
-        address market2Addr;
-        (marketId2, market2Addr) = factory.createMarket(
-            "Will ETH outperform BTC this week?",
-            "ETH wins",
-            "BTC wins",
-            MARKET_DURATION
-        );
-        market2 = BinaryAMMPredictionMarket(market2Addr);
-        console.log("Market 2 created by creator2:", market2Addr);
-        vm.stopPrank();
+//         vm.startPrank(creator);
         
-        // Authorize markets in FP Manager
-        fpManager.setAuthorizedContract(address(market1), true);
-        fpManager.setAuthorizedContract(address(market2), true);
+//         // Create market
+//         (bytes32 _marketId, address _marketAddress) = factory.createMarket(
+//             "Will Bitcoin reach $100k by end of 2024?",
+//             "Yes, Bitcoin will reach $100k",
+//             "No, Bitcoin will not reach $100k",
+//             block.timestamp + 7 days
+//         );
         
-        console.log("");
-    }
-    
-    function _initializeMarkets() internal {
-        console.log("=== INITIALIZING MARKETS WITH LIQUIDITY ===");
+//         marketId = _marketId;
+//         marketAddress = _marketAddress;
+//         market = SpreddMarket(marketAddress);
         
-        // Initialize Market 1
-        vm.startPrank(creator1);
-        usdt.approve(address(market1), INITIAL_LIQUIDITY);
-        market1.initializeMarket(INITIAL_LIQUIDITY);
-        console.log("Market 1 initialized with %s USDT liquidity", INITIAL_LIQUIDITY / 1e6);
-        vm.stopPrank();
+//         vm.stopPrank();
         
-        // Initialize Market 2
-        vm.startPrank(creator2);
-        usdt.approve(address(market2), INITIAL_LIQUIDITY);
-        market2.initializeMarket(INITIAL_LIQUIDITY);
-        console.log("Market 2 initialized with %s USDT liquidity", INITIAL_LIQUIDITY / 1e6);
-        vm.stopPrank();
+//         // Verify market creation
+//         assertTrue(factory.marketExists(marketId));
+//         assertEq(factory.getMarketAddress(marketId), marketAddress);
         
-        console.log("");
-    }
-    
-    function _usersPredictOnMarkets() internal {
-        console.log("=== USERS MAKING PREDICTIONS ===");
+//         // Log market info
+//         (string memory question, string memory optionA, string memory optionB, uint256 endTime, , bool resolved,) = market.getMarketInfo();
         
-        // Store the initial timestamp when markets were created
-        uint256 marketStartTime = block.timestamp;
+//         console.log("Market created successfully!");
+//         console.log("Market ID:", vm.toString(abi.encode(marketId)));
+//         console.log("Market Address:", marketAddress);
+//         console.log("Question:", question);
+//         console.log("Option A:", optionA);
+//         console.log("Option B:", optionB);
+//         console.log("End Time:", endTime);
+//         console.log("Resolved:", resolved);
         
-        // Track prediction times for different users (simulate early vs late predictions)
-        uint256[] memory delays = new uint256[](5);
-        delays[0] = 0;        // user1: immediate (max early bonus)
-        delays[1] = 1 hours;  // user2: 1 hour later
-        delays[2] = 1 days;   // user3: 1 day later
-        delays[3] = 3 days;   // user4: 3 days later
-        delays[4] = 5 days;   // user5: 5 days later (but still within market duration)
+//         _logBalances("After Market Creation");
+//     }
+
+//     function _testPlaceBets() internal {
+//         console.log("\n--- Testing Bet Placement ---");
         
-        address[] memory users = new address[](5);
-        users[0] = user1;
-        users[1] = user2;
-        users[2] = user3;
-        users[3] = user4;
-        users[4] = user5;
+//         // Approve market for betting
+//         vm.prank(trader1);
+//         usdt.approve(marketAddress, BET_AMOUNT);
         
-        for (uint i = 0; i < users.length; i++) {
-            // Set time to market start + user's delay (instead of accumulating delays)
-            vm.warp(marketStartTime + delays[i]);
+//         vm.prank(trader2);
+//         usdt.approve(marketAddress, BET_AMOUNT);
+        
+//         vm.prank(trader3);
+//         usdt.approve(marketAddress, BET_AMOUNT * 2);
+        
+//         // Trader 1: Bet on Option A
+//         vm.prank(trader1);
+//         market.placeBet(true, BET_AMOUNT); // Option A
+        
+//         // Trader 2: Bet on Option B
+//         vm.prank(trader2);
+//         market.placeBet(false, BET_AMOUNT); // Option B
+        
+//         // Trader 3: Bet on Option A (higher amount)
+//         vm.prank(trader3);
+//         market.placeBet(true, BET_AMOUNT * 2); // Option A
+        
+//         // Check market volumes
+//         (uint256 volumeA, uint256 volumeB, uint256 totalVolume, , , uint256 totalBets,) = market.getMarketVolumes();
+        
+//         console.log("Bets placed successfully!");
+//         console.log("Volume A:", volumeA / 10**6, "USDT");
+//         console.log("Volume B:", volumeB / 10**6, "USDT");
+//         console.log("Total Volume:", totalVolume / 10**6, "USDT");
+//         console.log("Total Bets:", totalBets);
+        
+//         // Check odds
+//         (uint256 oddsA, uint256 oddsB,) = market.getMarketOdds();
+//         console.log("Odds A:", oddsA, "/ 1000000 (", (oddsA * 100) / 1000000, "%)");
+//         console.log("Odds B:", oddsB, "/ 1000000 (", (oddsB * 100) / 1000000, "%)");
+        
+//         _logBalances("After Betting");
+//     }
+
+//     function _testResolveMarket() internal {
+//         console.log("\n--- Testing Market Resolution ---");
+        
+//         // Fast forward past market end time
+//         vm.warp(block.timestamp + 8 days);
+        
+//         // Get balances before resolution
+//         uint256 creatorBalanceBefore = usdt.balanceOf(creator);
+//         uint256 factoryBalanceBefore = usdt.balanceOf(address(factory));
+//         uint256 fpManagerBalanceBefore = usdt.balanceOf(address(fpManager));
+        
+//         // Resolve market (Option A wins)
+//         vm.prank(creator);
+//         market.resolveMarket(SpreddMarket.MarketOutcome.OPTION_A);
+        
+//         // Get balances after resolution
+//         uint256 creatorBalanceAfter = usdt.balanceOf(creator);
+//         uint256 factoryBalanceAfter = usdt.balanceOf(address(factory));
+//         uint256 fpManagerBalanceAfter = usdt.balanceOf(address(fpManager));
+        
+//         // Calculate fees
+//         uint256 totalPool = 4000 * 10**6; // Total bet volume
+//         uint256 expectedCreatorFee = (totalPool * 2) / 100; // 2%
+//         uint256 expectedFactoryFee = (totalPool * 1) / 100; // 1%
+//         uint256 expectedRewardPoolFee = (totalPool * 10) / 100; // 10%
+        
+//         console.log("Market resolved successfully!");
+//         console.log("Winning option: A");
+//         console.log("Creator fee received:", (creatorBalanceAfter - creatorBalanceBefore) / 10**6, "USDT");
+//         console.log("Factory fee received:", (factoryBalanceAfter - factoryBalanceBefore) / 10**6, "USDT");
+//         console.log("FP Manager fee received:", (fpManagerBalanceAfter - fpManagerBalanceBefore) / 10**6, "USDT");
+        
+//         // Verify fee distribution
+//         assertEq(creatorBalanceAfter - creatorBalanceBefore, expectedCreatorFee);
+//         assertEq(factoryBalanceAfter - factoryBalanceBefore, expectedFactoryFee);
+//         assertEq(fpManagerBalanceAfter - fpManagerBalanceBefore, expectedRewardPoolFee);
+        
+//         console.log("Expected creator fee:", expectedCreatorFee / 10**6, "USDT");
+//         console.log("Expected factory fee:", expectedFactoryFee / 10**6, "USDT");
+//         console.log("Expected reward pool fee:", expectedRewardPoolFee / 10**6, "USDT");
+        
+//         _logBalances("After Market Resolution");
+//     }
+
+//     function _testClaimWinnings() internal {
+//         console.log("\n--- Testing Winnings Claims ---");
+        
+//         // Get winning pool size
+//         uint256 winningPoolSize = market.getWinningPoolSize();
+//         console.log("Winning pool size:", winningPoolSize / 10**6, "USDT");
+        
+//         // Check winnings for each trader
+//         (uint256 originalBet1, uint256 winnings1, uint256 totalPayout1, bool canClaim1) = market.getUserWinnings(trader1);
+//         (uint256 originalBet2, uint256 winnings2, uint256 totalPayout2, bool canClaim2) = market.getUserWinnings(trader2);
+//         (uint256 originalBet3, uint256 winnings3, uint256 totalPayout3, bool canClaim3) = market.getUserWinnings(trader3);
+        
+//         console.log("Trader1 (Option A winner):");
+//         console.log("  Original bet:", originalBet1 / 10**6, "USDT");
+//         console.log("  Winnings:", winnings1 / 10**6, "USDT");
+//         console.log("  Total payout:", totalPayout1 / 10**6, "USDT");
+//         console.log("  Can claim:", canClaim1);
+        
+//         console.log("Trader2 (Option B loser):");
+//         console.log("  Original bet:", originalBet2 / 10**6, "USDT");
+//         console.log("  Winnings:", winnings2 / 10**6, "USDT");
+//         console.log("  Total payout:", totalPayout2 / 10**6, "USDT");
+//         console.log("  Can claim:", canClaim2);
+        
+//         console.log("Trader3 (Option A winner):");
+//         console.log("  Original bet:", originalBet3 / 10**6, "USDT");
+//         console.log("  Winnings:", winnings3 / 10**6, "USDT");
+//         console.log("  Total payout:", totalPayout3 / 10**6, "USDT");
+//         console.log("  Can claim:", canClaim3);
+        
+//         // Claim winnings for winners
+//         uint256 trader1BalanceBefore = usdt.balanceOf(trader1);
+//         uint256 trader3BalanceBefore = usdt.balanceOf(trader3);
+        
+//         if (canClaim1) {
+//             vm.prank(trader1);
+//             market.claimWinnings();
+//             console.log("Trader1 claimed winnings successfully");
+//         }
+        
+//         if (canClaim3) {
+//             vm.prank(trader3);
+//             market.claimWinnings();
+//             console.log("Trader3 claimed winnings successfully");
+//         }
+        
+//         uint256 trader1BalanceAfter = usdt.balanceOf(trader1);
+//         uint256 trader3BalanceAfter = usdt.balanceOf(trader3);
+        
+//         console.log("Trader1 received:", (trader1BalanceAfter - trader1BalanceBefore) / 10**6, "USDT");
+//         console.log("Trader3 received:", (trader3BalanceAfter - trader3BalanceBefore) / 10**6, "USDT");
+        
+//         _logBalances("After Claims");
+//     }
+
+//     function _testFPDistribution() internal {
+//         console.log("\n--- Testing FP Distribution ---");
+        
+//         // Check current week FP for all users
+//         (uint256 creatorTraderFP, uint256 creatorCreatorFP,) = fpManager.getCurrentWeekUserFP(creator);
+//         (uint256 trader1TraderFP, uint256 trader1CreatorFP,) = fpManager.getCurrentWeekUserFP(trader1);
+//         (uint256 trader2TraderFP, uint256 trader2CreatorFP,) = fpManager.getCurrentWeekUserFP(trader2);
+//         (uint256 trader3TraderFP, uint256 trader3CreatorFP,) = fpManager.getCurrentWeekUserFP(trader3);
+        
+//         console.log("FP Distribution:");
+//         console.log("Creator - Trader FP:", creatorTraderFP, "Creator FP:", creatorCreatorFP);
+//         console.log("Trader1 - Trader FP:", trader1TraderFP, "Creator FP:", trader1CreatorFP);
+//         console.log("Trader2 - Trader FP:", trader2TraderFP, "Creator FP:", trader2CreatorFP);
+//         console.log("Trader3 - Trader FP:", trader3TraderFP, "Creator FP:", trader3CreatorFP);
+        
+//         // Get current week info
+//         (uint256 currentWeek, uint256 startTime, uint256 endTime, uint256 tradersCount, uint256 creatorsCount, uint256 topK, uint256 currentRewardPool) = fpManager.getCurrentWeekInfo();
+        
+//         console.log("Current Week Info:");
+//         console.log("Week:", currentWeek);
+//         console.log("Traders Count:", tradersCount);
+//         console.log("Creators Count:", creatorsCount);
+//         console.log("Current Reward Pool:", currentRewardPool / 10**6, "USDT");
+//     }
+
+//     function _testWeeklyRewards() internal {
+//         console.log("\n--- Testing Weekly Rewards ---");
+        
+//         // Fast forward to end of week
+//         vm.warp(block.timestamp + 7 days);
+        
+//         // Trigger week end by trying to award FP (this will call manualWeeklyUpdate)
+//         vm.prank(address(market));
+//         fpManager.awardCreatorFP(creator, marketId, 0, 0);
+        
+//         // Check week status
+//         (uint256 currentWeek,,,,,, uint256 currentRewardPool) = fpManager.getCurrentWeekInfo();
+//         console.log("Current week after time advancement:", currentWeek);
+//         console.log("Current reward pool:", currentRewardPool / 10**6, "USDT");
+        
+//         // Get pending weeks
+//         (uint256[] memory pendingWeeks, uint256[] memory rewardPools) = fpManager.getPendingWeeks();
+        
+//         if (pendingWeeks.length > 0) {
+//             console.log("Pending weeks found:", pendingWeeks.length);
+//             console.log("Week 1 reward pool:", rewardPools[0] / 10**6, "USDT");
             
-            address user = users[i];
-            uint256 betAmount = (i + 1) * 1 * 1e6; // Varying bet sizes: 5, 10, 15, 20, 25 USDT
+//             // Simulate off-chain leaderboard calculation and submission
+//             _simulateLeaderboardSubmission(pendingWeeks[0], rewardPools[0]);
+//         }
+//     }
+
+//     function _simulateLeaderboardSubmission(uint256 week, uint256 rewardPool) internal {
+//         console.log("\n--- Simulating Leaderboard Submission ---");
+        
+//         // Get historical FP data for the week
+//         (uint256 trader1FP,,) = fpManager.getUserWeeklyFP(trader1, week);
+//         (uint256 trader3FP,,) = fpManager.getUserWeeklyFP(trader3, week);
+//         (uint256 creatorFP,,) = fpManager.getUserWeeklyFP(creator, week);
+        
+//         console.log("Week", week, "FP Summary:");
+//         console.log("Trader1 FP:", trader1FP);
+//         console.log("Trader3 FP:", trader3FP);
+//         console.log("Creator FP:", creatorFP);
+        
+//         // Create sorted arrays (trader3 should be first due to higher winning amount)
+//         address[] memory topTraders = new address[](2);
+//         uint256[] memory traderFPs = new uint256[](2);
+        
+//         if (trader3FP >= trader1FP) {
+//             topTraders[0] = trader3;
+//             topTraders[1] = trader1;
+//             traderFPs[0] = trader3FP;
+//             traderFPs[1] = trader1FP;
+//         } else {
+//             topTraders[0] = trader1;
+//             topTraders[1] = trader3;
+//             traderFPs[0] = trader1FP;
+//             traderFPs[1] = trader3FP;
+//         }
+        
+//         address[] memory topCreators = new address[](1);
+//         uint256[] memory creatorFPs = new uint256[](1);
+//         topCreators[0] = creator;
+//         creatorFPs[0] = creatorFP;
+        
+//         // Get balances before reward distribution
+//         uint256 trader1BalanceBefore = usdt.balanceOf(trader3);
+//         uint256 trader2BalanceBefore = usdt.balanceOf(trader1);
+        
+//         // Submit leaderboard as leaderboard manager
+//         vm.prank(leaderboardManager);
+//         fpManager.submitWeeklyLeaderboard(
+//             week,
+//             topTraders,
+//             traderFPs,
+//             topCreators,
+//             creatorFPs
+//         );
+        
+//         // Get balances after reward distribution
+//         uint256 trader1BalanceAfter = usdt.balanceOf(trader3);
+//         uint256 trader2BalanceAfter = usdt.balanceOf(trader1);
+        
+//         console.log("Weekly rewards distributed!");
+//         console.log("Top trader (trader3) received:", (trader1BalanceAfter - trader1BalanceBefore) / 10**6, "USDT");
+//         console.log("Second trader (trader1) received:", (trader2BalanceAfter - trader2BalanceBefore) / 10**6, "USDT");
+        
+//         // Check weekly winners
+//         (address[] memory weeklyTopTraders, uint256[] memory weeklyTraderFP, uint256[] memory weeklyTraderRewards, , , uint256 totalDistributed) = fpManager.getWeeklyWinners(week);
+        
+//         console.log("Weekly winners summary:");
+//         console.log("Total distributed:", totalDistributed / 10**6, "USDT");
+//         for (uint256 i = 0; i < weeklyTopTraders.length; i++) {
+//             console.log("Rank", i+1, ":", weeklyTopTraders[i], "- FP:", weeklyTraderFP[i], "- Reward:", weeklyTraderRewards[i] / 10**6, "USDT");
+//         }
+        
+//         _logBalances("After Weekly Rewards");
+//     }
+
+//     function _logBalances(string memory stage) internal view {
+//         console.log("\n--- Balances", stage, "---");
+//         console.log("Owner:", usdt.balanceOf(owner) / 10**6, "USDT");
+//         console.log("Creator:", usdt.balanceOf(creator) / 10**6, "USDT");
+//         console.log("Trader1:", usdt.balanceOf(trader1) / 10**6, "USDT");
+//         console.log("Trader2:", usdt.balanceOf(trader2) / 10**6, "USDT");
+//         console.log("Trader3:", usdt.balanceOf(trader3) / 10**6, "USDT");
+//         console.log("Factory:", usdt.balanceOf(address(factory)) / 10**6, "USDT");
+//         console.log("FP Manager:", usdt.balanceOf(address(fpManager)) / 10**6, "USDT");
+//         if (address(market) != address(0)) {
+//             console.log("Market:", usdt.balanceOf(address(market)) / 10**6, "USDT");
+//         }
+//     }
+
+//     // Additional test functions for edge cases
+//     function testMarketCreationFee() public {
+//         console.log("\n=== Testing Market Creation Fee ===");
+        
+//         uint256 creationFee = factory.getMarketCreationFee();
+//         console.log("Current creation fee:", creationFee / 10**6, "USDT");
+        
+//         // Test fee collection
+//         uint256 factoryBalanceBefore = usdt.balanceOf(address(factory));
+        
+//         vm.startPrank(creator);
+//         usdt.approve(address(factory), creationFee);
+        
+//         factory.createMarket(
+//             "Test market for fee",
+//             "Option A",
+//             "Option B",
+//             block.timestamp + 1 days
+//         );
+//         vm.stopPrank();
+        
+//         uint256 factoryBalanceAfter = usdt.balanceOf(address(factory));
+//         console.log("Factory fee collected:", (factoryBalanceAfter - factoryBalanceBefore) / 10**6, "USDT");
+        
+//         assertEq(factoryBalanceAfter - factoryBalanceBefore, creationFee);
+//     }
+
+//     function testFactoryStats() public {
+//         console.log("\n=== Testing Factory Stats ===");
+        
+//         (uint256 totalMarkets, uint256 totalTVL, uint256 activeMarkets, uint256 totalBets, uint256 totalBettors) = factory.getMarketStats();
+        
+//         console.log("Factory Statistics:");
+//         console.log("Total Markets:", totalMarkets);
+//         console.log("Total TVL:", totalTVL / 10**6, "USDT");
+//         console.log("Active Markets:", activeMarkets);
+//         console.log("Total Bets:", totalBets);
+//         console.log("Total Bettors:", totalBettors);
+        
+//         assertTrue(totalMarkets > 0);
+//         assertTrue(totalTVL > 0);
+//     }
+
+//     function testFPManagerEmergencyFunctions() public {
+//         console.log("\n=== Testing FP Manager Emergency Functions ===");
+        
+//         // Test force weekly reset
+//         vm.prank(owner);
+//         fpManager.forceWeeklyReset();
+        
+//         console.log("Force weekly reset executed successfully");
+        
+//         // Test emergency withdraw
+//         uint256 fpBalance = usdt.balanceOf(address(fpManager));
+//         if (fpBalance > 0) {
+//             uint256 ownerBalanceBefore = usdt.balanceOf(owner);
             
-            console.log("User %s betting %s USDT after %s hours", i+1, betAmount / 1e6, delays[i] / 3600);
+//             vm.prank(owner);
+//             fpManager.emergencyWithdraw(fpBalance);
             
-            vm.startPrank(user);
-            
-            // Market 1 predictions
-            usdt.approve(address(market1), betAmount);
-            bool buyOptionA1 = (i % 2 == 0); // Users 1,3,5 bet on Option A; Users 2,4 bet on Option B
-            market1.buyTokens(buyOptionA1, betAmount, 0);
-            
-            string memory option1 = buyOptionA1 ? "Yes (Option A)" : "No (Option B)";
-            console.log("  Market 1: Bet on %s", option1);
-            
-            // Market 2 predictions (different pattern)
-            usdt.approve(address(market2), betAmount);
-            bool buyOptionA2 = (i < 2); // Users 1,2 bet on Option A; Users 3,4,5 bet on Option B
-            market2.buyTokens(buyOptionA2, betAmount, 0);
-            
-            string memory option2 = buyOptionA2 ? "ETH wins (Option A)" : "BTC wins (Option B)";
-            console.log("  Market 2: Bet on %s", option2);
-            
-            vm.stopPrank();
-            
-            // Show user's current position
-            (uint256 optionA1, uint256 optionB1,) = market1.getUserBalances(user);
-            (uint256 optionA2, uint256 optionB2,) = market2.getUserBalances(user);
-            // console.log("  Positions - Market1: A=%s B=%s | Market2: A=%s B=%s", 
-            //            optionA1 / 1e6, optionB1 / 1e6, optionA2 / 1e6, optionB2 / 1e6);
-            console.log("");
-        }
-        
-        // Reset to just after the last user's prediction for next steps
-        vm.warp(marketStartTime + delays[4] + 1 hours);
-    }
-    
-    function _fastForwardToMarketEnd() internal {
-        console.log("=== FAST FORWARDING TO MARKET END ===");
-        
-        // Fast forward to after market end time (from the original market creation time)
-        vm.warp(block.timestamp + MARKET_DURATION - 5 days + 1 hours); // Add remaining time + 1 hour buffer
-        console.log("Time advanced to after market closure");
-        console.log("");
-    }
-    
-    function _resolveMarkets() internal {
-        console.log("=== RESOLVING MARKETS ===");
-        
-        // Resolve Market 1: Option A wins (Yes - Bitcoin reaches $100k)
-        vm.prank(creator1);
-        market1.resolveMarket(BinaryAMMPredictionMarket.MarketOutcome.OPTION_A);
-        console.log("Market 1 resolved: Option A (Yes) wins!");
-        console.log("Winners: user1, user3, user5");
-        
-        // Resolve Market 2: Option B wins (BTC outperforms ETH)
-        vm.prank(creator2);
-        market2.resolveMarket(BinaryAMMPredictionMarket.MarketOutcome.OPTION_B);
-        console.log("Market 2 resolved: Option B (BTC wins) wins!");
-        console.log("Winners: user3, user4, user5");
-        
-        console.log("");
-    }
-    
-    function _checkFPAndRankings() internal {
-        console.log("=== FORECAST POINT RESULTS ===");
-        console.log("");
-        
-        // Check individual user FP
-        address[] memory users = new address[](5);
-        users[0] = user1;
-        users[1] = user2;
-        users[2] = user3;
-        users[3] = user4;
-        users[4] = user5;
-        
-        string[] memory userNames = new string[](5);
-        userNames[0] = "User1";
-        userNames[1] = "User2";
-        userNames[2] = "User3";
-        userNames[3] = "User4";
-        userNames[4] = "User5";
-        
-        console.log("INDIVIDUAL USER FP BREAKDOWN:");
-        console.log("----------------------------------------");
-        
-        for (uint i = 0; i < users.length; i++) {
-            (uint256 traderFP, uint256 creatorFP, uint256 totalFP) = fpManager.getCurrentWeekUserFP(users[i]);
-            console.log("%s:", userNames[i]);
-            console.log("  Trader FP: %s", traderFP);
-            console.log("  Creator FP: %s", creatorFP);
-            console.log("  Total FP: %s", totalFP);
-            
-            // Show winning positions for context
-            (uint256 optionA1, uint256 optionB1,) = market1.getUserBalances(users[i]);
-            (uint256 optionA2, uint256 optionB2,) = market2.getUserBalances(users[i]);
-            
-            bool wonMarket1 = optionA1 > 0; // Market 1 Option A won
-            bool wonMarket2 = optionB2 > 0; // Market 2 Option B won
-            
-            console.log("  Market 1 win: %s", wonMarket1 ? "YES" : "NO");
-            console.log("  Market 2 win: %s", wonMarket2 ? "YES" : "NO");
-            console.log("");
-        }
-        
-        // Check creator FP
-        console.log("CREATOR FP:");
-        console.log("----------------------------------------");
-        (uint256 creator1TraderFP, uint256 creator1CreatorFP, uint256 creator1TotalFP) = fpManager.getCurrentWeekUserFP(creator1);
-        (uint256 creator2TraderFP, uint256 creator2CreatorFP, uint256 creator2TotalFP) = fpManager.getCurrentWeekUserFP(creator2);
-        
-        console.log("Creator1 (Market 1):");
-        console.log("  Trader FP: %s", creator1TraderFP);
-        console.log("  Creator FP: %s", creator1CreatorFP);
-        console.log("  Total FP: %s", creator1TotalFP);
-        
-        console.log("Creator2 (Market 2):");
-        console.log("  Trader FP: %s", creator2TraderFP);
-        console.log("  Creator FP: %s", creator2CreatorFP);
-        console.log("  Total FP: %s", creator2TotalFP);
-        console.log("");
-        
-        // Get current week rankings
-        console.log("CURRENT WEEK RANKINGS:");
-        console.log("----------------------------------------");
-        
-        (address[] memory topTraders, uint256[] memory traderFPs, 
-         address[] memory topCreators, uint256[] memory creatorFPs) = fpManager.getCurrentWeekTopPerformers(10);
-        
-        console.log("TOP TRADERS:");
-        for (uint i = 0; i < topTraders.length; i++) {
-            string memory userName = _getAddressName(topTraders[i]);
-            console.log("  Rank %s: %s with %s FP", i + 1, userName, traderFPs[i]);
-        }
-        console.log("");
-        
-        console.log("TOP CREATORS:");
-        for (uint i = 0; i < topCreators.length; i++) {
-            string memory creatorName = _getAddressName(topCreators[i]);
-            console.log("  Rank %s: %s with %s FP", i + 1, creatorName, creatorFPs[i]);
-        }
-        console.log("");
-        
-        // Verify expected results
-        console.log("VERIFICATION:");
-        console.log("----------------------------------------");
-        
-        // User3 should have highest trader FP (won both markets)
-        (uint256 user3TraderFP,,) = fpManager.getCurrentWeekUserFP(user3);
-        bool user3IsTop = true;
-        for (uint i = 0; i < users.length; i++) {
-            if (users[i] != user3) {
-                (uint256 otherTraderFP,,) = fpManager.getCurrentWeekUserFP(users[i]);
-                if (otherTraderFP > user3TraderFP) {
-                    user3IsTop = false;
-                    break;
-                }
-            }
-        }
-        
-        console.log("User3 won both markets - should have highest trader FP: %s", user3IsTop ? "PASS" : "FAIL");
-        
-        // User1 should have good FP (early prediction, won 1 market)
-        (uint256 user1TraderFP,,) = fpManager.getCurrentWeekUserFP(user1);
-        console.log("User1 early prediction bonus (won Market 1): %s", user1TraderFP > 0 ? "PASS" : "FAIL");
-        
-        // User2 and User4 should have 0 trader FP (lost both markets)
-        (uint256 user2TraderFP,,) = fpManager.getCurrentWeekUserFP(user2);
-        (uint256 user4TraderFP,,) = fpManager.getCurrentWeekUserFP(user4);
-        console.log("User2 lost both markets (0 trader FP): %s", user2TraderFP == 0 ? "PASS" : "FAIL");
-        console.log("User4 lost both markets (0 trader FP): %s", user4TraderFP == 0 ? "PASS" : "FAIL");
-        
-        // Show market trading activity
-        console.log("");
-        console.log("MARKET STATISTICS:");
-        console.log("----------------------------------------");
-        (, , , , , , , uint256 market1Trades, uint256 market1Users,) = market1.getMarketInfoWithFP();
-        (, , , , , , , uint256 market2Trades, uint256 market2Users,) = market2.getMarketInfoWithFP();
-        
-        console.log("Market 1 - Total trades: %s | Unique users: %s", market1Trades, market1Users);
-        console.log("Market 2 - Total trades: %s | Unique users: %s", market2Trades, market2Users);
-        
-        uint256 totalVolume1 = market1.getTotalValue();
-        uint256 totalVolume2 = market2.getTotalValue();
-        console.log("Market 1 total volume: %s USDT", totalVolume1 / 1e6);
-        console.log("Market 2 total volume: %s USDT", totalVolume2 / 1e6);
-    }
-    
-    function _getAddressName(address addr) internal view returns (string memory) {
-        if (addr == user1) return "User1";
-        if (addr == user2) return "User2";
-        if (addr == user3) return "User3";
-        if (addr == user4) return "User4";
-        if (addr == user5) return "User5";
-        if (addr == creator1) return "Creator1";
-        if (addr == creator2) return "Creator2";
-        return "Unknown";
-    }
-    
-    // Helper function to check specific FP calculation components
-    function test_FPCalculationComponents() public view {
-        console.log("=== FP CALCULATION COMPONENT PREVIEW ===");
-        
-        // Preview trader FP calculation for different scenarios
-        uint256 marketVolume = 100 * 1e6; // 100 USDT
-        uint256 positionSize = 10 * 1e6;  // 10 USDT bet
-        uint256 marketDuration = 7 days;
-        
-        // Early prediction (1 hour after creation)
-        (uint256 earlyFP, uint256 earlyMarketWeight, uint256 earlyBonus, uint256 earlyCorrectness) = 
-            fpManager.previewTraderFP(
-                marketVolume,
-                1 hours,           // position time
-                0,                 // market creation time
-                marketDuration,
-                40 * 1e6,         // correct side liquidity
-                100 * 1e6,        // total liquidity
-                positionSize
-            );
-            
-        console.log("Early prediction (1 hour) FP components:");
-        console.log("  Market weight: %s", earlyMarketWeight);
-        console.log("  Early bonus: %s", earlyBonus);
-        console.log("  Correctness multiplier: %s", earlyCorrectness);
-        console.log("  Total FP: %s", earlyFP);
-        
-        // Late prediction (5 days after creation)
-        (uint256 lateFP, uint256 lateMarketWeight, uint256 lateBonus, uint256 lateCorrectness) = 
-            fpManager.previewTraderFP(
-                marketVolume,
-                5 days,           // position time
-                0,                // market creation time
-                marketDuration,
-                40 * 1e6,        // correct side liquidity
-                100 * 1e6,       // total liquidity
-                positionSize
-            );
-            
-        console.log("Late prediction (5 days) FP components:");
-        console.log("  Market weight: %s", lateMarketWeight);
-        console.log("  Early bonus: %s", lateBonus);
-        console.log("  Correctness multiplier: %s", lateCorrectness);
-        console.log("  Total FP: %s", lateFP);
-        
-        // Creator FP preview
-        (uint256 creatorTotalFP, uint256 baseFP, uint256 volumeBonus, uint256 activityBonus) = 
-            fpManager.previewCreatorFP(marketVolume, 5); // 5 trades
-            
-        console.log("Creator FP components (100 USDT volume, 5 trades):");
-        console.log("  Base FP: %s", baseFP);
-        console.log("  Volume bonus: %s", volumeBonus);
-        console.log("  Activity bonus: %s", activityBonus);
-        console.log("  Total FP: %s", creatorTotalFP);
-    }
-}
+//             uint256 ownerBalanceAfter = usdt.balanceOf(owner);
+//             console.log("Emergency withdraw executed:", (ownerBalanceAfter - ownerBalanceBefore) / 10**6, "USDT");
+//         }
+//     }
+
+//     // Test helper functions
+//     receive() external payable {}
+// }

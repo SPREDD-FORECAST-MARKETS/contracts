@@ -2,7 +2,7 @@
 pragma solidity ^0.8.17;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@thirdweb-dev/contracts/extension/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -69,7 +69,7 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
     uint256 public constant totalFeePercent = 13; // 13% total fees
 
     address public immutable fpManager; // FP Manager contract
-
+    uint256 public winningPoolSize;
     /// @notice Events
     event BetPlaced(
         address indexed user,
@@ -275,15 +275,17 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
             token.safeTransfer(owner(), creatorReward);
         }
         if (rewardPoolReward > 0) {
-            token.approve(fpManager, rewardPoolReward);
-            fpManager.call(abi.encodeWithSignature("contributeToRewardPool(uint256)", rewardPoolReward));
+          token.safeTransfer(fpManager, rewardPoolReward);
         }
         if (factoryReward > 0) {
             token.safeTransfer(factory, factoryReward);
         }
 
+        winningPoolSize = token.balanceOf(address(this));
+
         emit MarketResolved(_outcome);
         emit FeesDistributed(creatorReward, rewardPoolReward, factoryReward);
+
     }
 
     /**
@@ -333,11 +335,13 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
         if (userWinningBet > 0 && totalWinningVolume > 0) {
             // Winner gets their original bet PLUS proportional share of losing side after fees
             // Total pool available = total volume (fees deducted during resolution)
-            uint256 totalPoolAfterFees = totalPool - (totalPool * totalFeePercent) / 100;
+
+            require(winningPoolSize > 0, "Winning pool size not set");
+            // uint256 totalPoolAfterFees = totalPool - (totalPool * totalFeePercent) / 100;   // changed this
             
             // Calculate user's proportional share of the total pool after fees
             uint256 userProportion = (userWinningBet * 1e18) / totalWinningVolume;
-            totalPayout = (totalPoolAfterFees * userProportion) / 1e18;
+            totalPayout = (winningPoolSize * userProportion) / 1e18;
             winnings = totalPayout > originalBet ? totalPayout - originalBet : 0;
             
             return (originalBet, winnings, totalPayout, true);
@@ -449,6 +453,18 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
     }
 
     /**
+     * @notice Send fees to factory and update accounting
+     */
+
+//     function sendFeesToFactory() internal {
+//     uint256 feeAmount = calculateFees();
+    
+//     IERC20(token).safeTransfer(factory, feeAmount);
+    
+//     ISpreddFactory(factoryAddress).recordFeeFromMarket(feeAmount);
+// }
+
+    /**
      * @notice Get user's bet information
      */
     function getUserBet(address _user) 
@@ -548,8 +564,7 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
     function getWinningPoolSize() external view returns (uint256) {
         if (!marketInfo.resolved) return 0;
         
-        uint256 totalPool = marketInfo.totalVolumeA + marketInfo.totalVolumeB;
-        return totalPool - (totalPool * totalFeePercent) / 100;
+        return winningPoolSize;
     }
 
     /**
@@ -565,3 +580,7 @@ contract SpreddMarket is Ownable, ReentrancyGuard {
         }
     }
 }
+
+
+
+

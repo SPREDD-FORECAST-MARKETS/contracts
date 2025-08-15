@@ -4,7 +4,7 @@ pragma solidity ^0.8.17;
 import {Ownable} from "@thirdweb-dev/contracts/extension/Ownable.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {SpreddMarket} from "./SpreddMarket.sol";
-import {WeeklyForecastPointManager} from "./FPManager.sol";
+import {WeeklyForecastPointManager} from "../FPManager.sol";
 
 /**
 * @title SpreddMarketFactory
@@ -18,6 +18,7 @@ contract SpreddMarketFactory is Ownable {
     mapping(bytes32 => address) public markets;
     mapping(address => bytes32[]) public ownerMarkets;
     mapping(address => bytes32[]) public tokenMarkets; // Markets by token address
+    mapping(address => bool) public validMarkets;
     bytes32[] public allMarkets;
 
     // Trading Token
@@ -31,7 +32,11 @@ contract SpreddMarketFactory is Ownable {
     address[] public supportedTokensList;
 
     // Market creation fee
-    uint256 public marketCreationFee = 0.001 ether; // ETH fee for creating markets
+    uint256 public marketCreationFee = 1 * 10**6; // ETH fee for creating markets
+
+    uint256 private constant MINIMUM_CREATION_FEE = 1 * 10**6; // Minimum fee to prevent spam
+
+    uint256 private constant MAXIMUM_CREATION_FEE = 50 * 10**6; // Maximum fee to prevent excessive fees
     
     // Factory fee collection
     uint256 public collectedFees; // Total factory fees collected
@@ -50,12 +55,22 @@ contract SpreddMarketFactory is Ownable {
         uint256 endTime
     );
 
+    event FeesRecorded(address indexed market, uint256 amount, uint256 totalFees);
+
     event TokenAdded(address indexed token);
     event TokenRemoved(address indexed token);
     event MarketCreationFeeUpdated(uint256 newFee);
     event FactoryFeesWithdrawn(address indexed to, uint256 amount);
 
-    constructor(address _token) {
+
+    modifier validAddress(address _addr) {
+    require(_addr != address(0), "Cannot be zero address");
+    require(_addr != 0x000000000000000000000000000000000000dEaD, "Cannot be dead address");
+    _;
+    } 
+
+    constructor(address _token) validAddress(_token) {
+        
         _setupOwner(msg.sender);
         tradingToken = _token;
         
@@ -72,9 +87,8 @@ contract SpreddMarketFactory is Ownable {
     * @notice Add a supported ERC-20 token for market creation
     * @param _token The ERC-20 token address to add
     */
-    function addSupportedToken(address _token) external {
+    function addSupportedToken(address _token) external validAddress(_token) {
         require(msg.sender == owner(), "Only owner can add tokens");
-        require(_token != address(0), "Invalid token address");
         require(!supportedTokens[_token], "Token already supported");
 
         supportedTokens[_token] = true;
@@ -111,7 +125,10 @@ contract SpreddMarketFactory is Ownable {
     */
     function setMarketCreationFee(uint256 _newFee) external {
         require(msg.sender == owner(), "Only owner can set fee");
+        require(_newFee >= MINIMUM_CREATION_FEE, "Fee too low");
+        require(_newFee <= MAXIMUM_CREATION_FEE, "Fee too high");
         marketCreationFee = _newFee;
+
         emit MarketCreationFeeUpdated(_newFee);
     }
 
@@ -190,27 +207,20 @@ contract SpreddMarketFactory is Ownable {
     * @notice Set FP Manager
     * @param _fpManager The FP Manager contract address
     */
-    function setFPManager(address _fpManager) external {
+    function setFPManager(address _fpManager) external validAddress(_fpManager) {
         require(msg.sender == owner(), "only owner can call this method");
         fpManager = WeeklyForecastPointManager(_fpManager);
     }
 
-    /**
-    * @notice Receive factory fees from markets (called by market contracts)
+      /**
+    * @notice Record fees collected from markets
     */
-    function receiveFactoryFees(uint256 _amount) external {
-        // Verify caller is a valid market
-        bool isValidMarket = false;
-        for (uint256 i = 0; i < allMarkets.length; i++) {
-            if (markets[allMarkets[i]] == msg.sender) {
-                isValidMarket = true;
-                break;
-            }
-        }
-        require(isValidMarket, "Only markets can send fees");
 
-        IERC20(tradingToken).safeTransferFrom(msg.sender, address(this), _amount);
-        collectedFees += _amount;
+    function recordFeeFromMarket(uint256 amount) external {
+        require(validMarkets[msg.sender], "Not authorized market");
+        collectedFees += amount;
+            
+        emit FeesRecorded(msg.sender, amount, collectedFees);
     }
 
     /**
